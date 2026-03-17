@@ -46,9 +46,8 @@ if (pkg.sideEffects) {
 	pkg.sideEffects = pkg.sideEffects.map((p: string) => rewritePath(p, "js"));
 }
 
-if (pkg.files) {
-	pkg.files = pkg.files.map((p: string) => rewritePath(p, "js"));
-}
+// Remove the files field; everything in dist/ should be published.
+delete pkg.files;
 
 if (pkg.bin) {
 	if (typeof pkg.bin === "string") {
