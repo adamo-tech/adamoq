@@ -321,28 +321,24 @@ check:
 	set -euo pipefail
 
 	# Run the Javascript checks.
-	bun install --frozen-lockfile --silent
-	if tty -s; then
-		bun run --filter='*' --elide-lines=0 check
-	else
-		bun run --filter='*' --silent check > /dev/null
-	fi
+	bun install --frozen-lockfile
+	bun run --filter='*' check
 	bun biome check
 	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
-	cargo check --all-targets --quiet
-	cargo clippy --all-targets --quiet -- -D warnings
+	cargo check --all-targets
+	cargo clippy --all-targets -- -D warnings
 	cargo fmt --all --check
 
 	# Check documentation warnings (only workspace crates, not dependencies)
-	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 	# requires: cargo install cargo-shear
 	cargo shear
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace --check > /dev/null
+	cargo sort --workspace --check
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
@@ -366,7 +362,7 @@ ci:
 
 	# Check all feature combinations for all crates
 	# requires: cargo install cargo-hack
-	cargo hack check --workspace --each-feature --no-dev-deps --quiet --exclude moq-ffi
+	cargo hack check --workspace --each-feature --no-dev-deps --exclude moq-ffi
 
 # Check semver compatibility against crates.io
 # requires: cargo install cargo-semver-checks
@@ -384,31 +380,27 @@ test *args:
 	set -euo pipefail
 
 	# Run the Javascript tests.
-	bun install --frozen-lockfile --silent
-	if tty -s; then
-		bun run --filter='*' --elide-lines=0 test
-	else
-		bun run --filter='*' --silent test > /dev/null
-	fi
+	bun install --frozen-lockfile
+	bun run --filter='*' test
 
-	cargo test --all-targets --quiet {{ args }}
+	cargo test --all-targets {{ args }}
 
 # Automatically fix some issues.
 fix:
 	# Fix the Javascript dependencies.
-	bun install --silent
+	bun install
 	bun biome check --write
 	echo "JS fixes applied."
 
 	# Fix the Rust issues.
-	cargo clippy --fix --allow-staged --allow-dirty --all-targets --quiet
+	cargo clippy --fix --allow-staged --allow-dirty --all-targets
 	cargo fmt --all
 
 	# requires: cargo install cargo-shear
 	cargo shear --fix
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace > /dev/null
+	cargo sort --workspace
 
 	if command -v tofu &> /dev/null; then (cd cdn && just fix); fi
 
@@ -433,7 +425,7 @@ update:
 # Build the packages
 build:
 	bun run --filter='*' build
-	cargo build --quiet
+	cargo build
 
 # Generate and serve an HLS stream from a video for testing pub-hls
 serve-hls name port="8000":
