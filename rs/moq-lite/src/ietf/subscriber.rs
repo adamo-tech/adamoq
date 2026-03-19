@@ -496,7 +496,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
 		loop {
-			let mut track = tokio::select! {
+			let track = tokio::select! {
 				track = broadcast.requested_track() => match track {
 					Ok(track) => track,
 					Err(err) => {
@@ -511,14 +511,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let path = path.to_owned();
 			web_async::spawn(async move {
-				this.run_subscribe(path, &mut track).await;
+				this.run_subscribe(path, track).await;
 			});
 		}
 
 		Ok(())
 	}
 
-	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, track: &mut TrackProducer) {
+	async fn run_subscribe(&mut self, broadcast_path: Path<'_>, mut track: TrackProducer) {
 		let broadcast = broadcast_path;
 		let request_id = match self.control.next_request_id().await {
 			Ok(id) => id,
@@ -552,7 +552,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 
 		// Write Subscribe message
-		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, track).await {
+		if let Err(err) = self.write_subscribe(&mut stream, request_id, &broadcast, &track).await {
 			tracing::debug!(%err, "failed to write subscribe");
 			self.state.lock().subscribes.remove(&request_id);
 			let _ = track.abort(err);

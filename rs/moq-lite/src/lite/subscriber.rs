@@ -156,7 +156,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		loop {
 			// Keep serving requests until there are no more consumers.
 			// This way we'll clean up the task when the broadcast is no longer needed.
-			let mut track = tokio::select! {
+			let track = tokio::select! {
 				track = broadcast.requested_track() => match track {
 					Ok(track) => track,
 					Err(err) => {
@@ -172,13 +172,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let path = path.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, &mut track).await;
+				this.run_subscribe(id, path, track).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast_path: Path<'_>, track: &mut TrackProducer) {
+	async fn run_subscribe(&mut self, id: u64, broadcast_path: Path<'_>, mut track: TrackProducer) {
 		let track_name = track.info.name.clone();
 
 		self.subscribes.lock().insert(id, track.clone());

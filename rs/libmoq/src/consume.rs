@@ -48,6 +48,8 @@ impl Consume {
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let broadcast = self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
+		let track = broadcast.consume_track(&hang::catalog::Catalog::default_track())?;
+		let catalog = hang::CatalogConsumer::from(track);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -58,7 +60,7 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_catalog(id, broadcast) => res,
+				res = Self::run_catalog(id, broadcast, catalog) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -71,9 +73,11 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_catalog(task_id: Id, broadcast: moq_lite::BroadcastConsumer) -> Result<(), Error> {
-		let track = broadcast.consume_track(&hang::catalog::Catalog::default_track())?;
-		let mut catalog = hang::CatalogConsumer::from(track);
+	async fn run_catalog(
+		task_id: Id,
+		broadcast: moq_lite::BroadcastConsumer,
+		mut catalog: hang::CatalogConsumer,
+	) -> Result<(), Error> {
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
 			let audio_codec = catalog
@@ -214,8 +218,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let broadcast = consume.broadcast.clone();
-		let track_info = moq_lite::Track::new(rendition.clone());
+		let track = consume
+			.broadcast
+			.consume_track(&moq_lite::Track::new(rendition.clone()))?;
+		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -226,7 +232,7 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, broadcast, &track_info, latency) => res,
+				res = Self::run_track(id, track) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -255,8 +261,10 @@ impl Consume {
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
 
-		let broadcast = consume.broadcast.clone();
-		let track_info = moq_lite::Track::new(rendition.clone());
+		let track = consume
+			.broadcast
+			.consume_track(&moq_lite::Track::new(rendition.clone()))?;
+		let track = hang::container::OrderedConsumer::new(track, latency);
 
 		let channel = oneshot::channel();
 		let entry = TaskEntry {
@@ -267,7 +275,7 @@ impl Consume {
 
 		tokio::spawn(async move {
 			let res = tokio::select! {
-				res = Self::run_track(id, broadcast, &track_info, latency) => res,
+				res = Self::run_track(id, track) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -280,14 +288,7 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(
-		task_id: Id,
-		broadcast: moq_lite::BroadcastConsumer,
-		track_info: &moq_lite::Track,
-		latency: std::time::Duration,
-	) -> Result<(), Error> {
-		let track = broadcast.consume_track(track_info)?;
-		let mut track = hang::container::OrderedConsumer::new(track, latency);
+	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
