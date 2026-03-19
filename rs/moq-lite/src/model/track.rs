@@ -534,17 +534,6 @@ impl TrackWeak {
 			state: self.state.consume(),
 		}
 	}
-
-	pub async fn unused(&self) -> crate::Result<()> {
-		self.state
-			.unused()
-			.await
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
-	}
-
-	pub fn is_clone(&self, other: &Self) -> bool {
-		self.state.same_channel(&other.state)
-	}
 }
 
 /// Iterates groups from a track while managing this subscriber's subscription lifecycle.

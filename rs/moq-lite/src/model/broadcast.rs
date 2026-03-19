@@ -75,29 +75,6 @@ fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>,
 	}
 }
 
-/// Spawn a cleanup task that removes the track from the lookup when all consumers are dropped.
-fn spawn_track_cleanup(state: &conducer::Producer<State>, track: &TrackProducer) {
-	let weak = track.weak();
-	let consumer_state = state.consume();
-	web_async::spawn(async move {
-		let _ = weak.unused().await;
-
-		let Some(producer) = consumer_state.produce() else {
-			return;
-		};
-		let Ok(mut state) = producer.write() else {
-			return;
-		};
-
-		// Remove the entry, but reinsert if it was replaced by a different reference.
-		if let Some(current) = state.tracks.remove(&weak.info.name)
-			&& !current.is_clone(&weak)
-		{
-			state.tracks.insert(current.info.name.clone(), current);
-		}
-	});
-}
-
 /// Manages tracks within a broadcast.
 ///
 /// Insert tracks statically with [Self::insert_track] / [Self::create_track],
@@ -200,13 +177,10 @@ impl BroadcastProducer {
 	}
 }
 
-/// Insert a track into the broadcast lookup and spawn a cleanup task.
+/// Insert a track into the broadcast lookup.
 fn insert_track_impl(state: &conducer::Producer<State>, track: &TrackProducer) -> Result<(), Error> {
 	let mut guard = modify(state)?;
 	guard.insert_track(track)?;
-	drop(guard);
-
-	spawn_track_cleanup(state, track);
 	Ok(())
 }
 
@@ -368,10 +342,7 @@ impl BroadcastConsumer {
 		let track_producer = TrackProducer::new(track.clone());
 		state.insert_track(&track_producer)?;
 		let consumer = track_producer.consume();
-		state.requested.push(track_producer.clone());
-		drop(state);
-
-		spawn_track_cleanup(&producer, &track_producer);
+		state.requested.push(track_producer);
 
 		Ok(consumer)
 	}
@@ -511,15 +482,10 @@ mod test {
 
 		// The consumer should see the track as closed.
 		track1_consumer.assert_closed();
-
-		// Advance time to let cleanup task run.
-		tokio::time::advance(std::time::Duration::from_millis(1)).await;
-		let track1_consumer_clone = consumer.assert_consume_track(&Track::new("track1"));
 		drop(track1_consumer);
-		drop(track1_consumer_clone);
-		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
-		// Subscribe again to the same track -- should get a new request.
+		// Subscribe again to the same track -- should get a new request
+		// because the old producer was dropped (weak ref is closed).
 		let track2_consumer = consumer.assert_consume_track(&Track::new("track1"));
 
 		let mut producer2 = dynamic.assert_request();
@@ -530,7 +496,6 @@ mod test {
 
 	#[tokio::test]
 	async fn requested_unused() {
-		tokio::time::pause();
 		let broadcast = Broadcast::new().produce();
 		let mut dynamic = broadcast.dynamic();
 
@@ -564,15 +529,15 @@ mod test {
 			"track producer should be unused after consumer is dropped"
 		);
 
-		// Advance paused time to let the async cleanup task run.
-		tokio::time::advance(std::time::Duration::from_millis(1)).await;
+		// Drop the producer so the weak ref is closed.
+		drop(producer1);
 
-		// Now we can subscribe again.
+		// Now consume_track finds the stale entry, removes it, and creates a new request.
 		let c2 = broadcast.consume();
 		let _consumer3 = c2.assert_consume_track(&Track::new("unknown_track"));
 
-		let producer2 = dynamic.assert_request();
-		assert!(!producer2.is_clone(&producer1));
+		let _producer2 = dynamic.assert_request();
+		dynamic.assert_no_request();
 	}
 
 	#[tokio::test]
