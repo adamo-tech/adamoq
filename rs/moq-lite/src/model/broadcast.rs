@@ -50,11 +50,52 @@ struct State {
 	abort: Option<Error>,
 }
 
+impl State {
+	/// Insert a track into the lookup, returning an error if a live track with the same name exists.
+	fn insert_track(&mut self, track: &TrackProducer) -> Result<(), Error> {
+		match self.tracks.entry(track.info.name.clone()) {
+			hash_map::Entry::Occupied(mut entry) => {
+				if !entry.get().is_closed() {
+					return Err(Error::Duplicate);
+				}
+				entry.insert(track.weak());
+			}
+			hash_map::Entry::Vacant(entry) => {
+				entry.insert(track.weak());
+			}
+		}
+		Ok(())
+	}
+}
+
 fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>, Error> {
 	match state.write() {
 		Ok(state) => Ok(state),
 		Err(r) => Err(r.abort.clone().unwrap_or(Error::Dropped)),
 	}
+}
+
+/// Spawn a cleanup task that removes the track from the lookup when all consumers are dropped.
+fn spawn_track_cleanup(state: &conducer::Producer<State>, track: &TrackProducer) {
+	let weak = track.weak();
+	let consumer_state = state.consume();
+	web_async::spawn(async move {
+		let _ = weak.unused().await;
+
+		let Some(producer) = consumer_state.produce() else {
+			return;
+		};
+		let Ok(mut state) = producer.write() else {
+			return;
+		};
+
+		// Remove the entry, but reinsert if it was replaced by a different reference.
+		if let Some(current) = state.tracks.remove(&weak.info.name)
+			&& !current.is_clone(&weak)
+		{
+			state.tracks.insert(current.info.name.clone(), current);
+		}
+	});
 }
 
 /// Manages tracks within a broadcast.
@@ -159,43 +200,13 @@ impl BroadcastProducer {
 	}
 }
 
-/// Shared helper to insert a track into the broadcast lookup.
+/// Insert a track into the broadcast lookup and spawn a cleanup task.
 fn insert_track_impl(state: &conducer::Producer<State>, track: &TrackProducer) -> Result<(), Error> {
 	let mut guard = modify(state)?;
+	guard.insert_track(track)?;
+	drop(guard);
 
-	match guard.tracks.entry(track.info.name.clone()) {
-		hash_map::Entry::Occupied(mut entry) => {
-			if !entry.get().is_closed() {
-				return Err(Error::Duplicate);
-			}
-			entry.insert(track.weak());
-		}
-		hash_map::Entry::Vacant(entry) => {
-			entry.insert(track.weak());
-		}
-	}
-
-	// Spawn cleanup task to remove the track from the lookup when unused.
-	let weak = track.weak();
-	let consumer_state = state.consume();
-	web_async::spawn(async move {
-		let _ = weak.unused().await;
-
-		let Some(producer) = consumer_state.produce() else {
-			return;
-		};
-		let Ok(mut state) = producer.write() else {
-			return;
-		};
-
-		// Remove the entry, but reinsert if it was replaced by a different reference.
-		if let Some(current) = state.tracks.remove(&weak.info.name)
-			&& !current.is_clone(&weak)
-		{
-			state.tracks.insert(current.info.name.clone(), current);
-		}
-	});
-
+	spawn_track_cleanup(state, track);
 	Ok(())
 }
 
@@ -359,41 +370,12 @@ impl BroadcastConsumer {
 
 		// Create a new TrackProducer, insert into lookup, and queue for dynamic handler.
 		let track_producer = TrackProducer::new(track.clone());
-
-		// Insert into the lookup so subsequent consume_track calls find it.
-		match state.tracks.entry(track.name.clone()) {
-			hash_map::Entry::Occupied(mut entry) => {
-				entry.insert(track_producer.weak());
-			}
-			hash_map::Entry::Vacant(entry) => {
-				entry.insert(track_producer.weak());
-			}
-		}
-
-		// Spawn cleanup task.
-		let weak = track_producer.weak();
-		let consumer_state = producer.consume();
-		web_async::spawn(async move {
-			let _ = weak.unused().await;
-
-			let Some(p) = consumer_state.produce() else {
-				return;
-			};
-			let Ok(mut s) = p.write() else {
-				return;
-			};
-
-			if let Some(current) = s.tracks.remove(&weak.info.name)
-				&& !current.is_clone(&weak)
-			{
-				s.tracks.insert(current.info.name.clone(), current);
-			}
-		});
-
+		state.insert_track(&track_producer).expect("just removed stale entry");
 		let consumer = track_producer.consume();
+		state.requested.push(track_producer.clone());
+		drop(state);
 
-		// Queue the producer for the dynamic handler.
-		state.requested.push(track_producer);
+		spawn_track_cleanup(&producer, &track_producer);
 
 		Ok(consumer)
 	}
