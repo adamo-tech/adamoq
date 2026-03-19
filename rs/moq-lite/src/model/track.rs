@@ -53,9 +53,10 @@ pub struct Subscription {
 	pub ordered: bool,
 	/// Maximum cache/latency. `Duration::ZERO` means unlimited.
 	pub max_latency: Duration,
-	/// First group sequence to deliver. `None` means start at the latest.
+	/// First group sequence to deliver. `None` means no preference.
+	/// Use [`TrackSubscriber::update`] to set a concrete value once `latest()` is known.
 	pub start: Option<u64>,
-	/// Last group sequence to deliver. `None` means no end (live).
+	/// Last group sequence to deliver. `None` means no preference (live).
 	pub end: Option<u64>,
 }
 
@@ -198,23 +199,25 @@ impl State {
 			})
 			.unwrap();
 
-		// start: min across all (earliest requested group). None = latest.
+		// start: min across all concrete values. None = no preference (defer to others).
 		let start = subs
 			.iter()
 			.map(|s| s.start)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.min(b)),
-				_ => None,
+				(Some(a), None) | (None, Some(a)) => Some(a),
+				(None, None) => None,
 			})
 			.unwrap();
 
-		// end: max across all (latest / unlimited). None = no end (live).
+		// end: max across all concrete values. None = no end (defer to others).
 		let end = subs
 			.iter()
 			.map(|s| s.end)
 			.reduce(|a, b| match (a, b) {
 				(Some(a), Some(b)) => Some(a.max(b)),
-				_ => None,
+				(Some(a), None) | (None, Some(a)) => Some(a),
+				(None, None) => None,
 			})
 			.unwrap();
 

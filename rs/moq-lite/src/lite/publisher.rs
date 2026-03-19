@@ -293,8 +293,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
-		// No-op: start_at was removed from TrackConsumer
-
 		loop {
 			let group = tokio::select! {
 				// Poll all active group futures; never matches but keeps them running.

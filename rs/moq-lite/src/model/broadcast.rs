@@ -366,7 +366,7 @@ impl BroadcastConsumer {
 
 		// Create a new TrackProducer, insert into lookup, and queue for dynamic handler.
 		let track_producer = TrackProducer::new(track.clone());
-		state.insert_track(&track_producer).expect("just removed stale entry");
+		state.insert_track(&track_producer)?;
 		let consumer = track_producer.consume();
 		state.requested.push(track_producer.clone());
 		drop(state);
