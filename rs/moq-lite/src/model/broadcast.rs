@@ -425,19 +425,18 @@ mod test {
 
 		let consumer = producer.consume();
 
-		let mut track1_consumer = consumer.assert_consume_track(&Track::new("track1"));
-		track1_consumer.assert_group();
+		let track1_consumer = consumer.assert_consume_track(&Track::new("track1"));
+		assert_eq!(track1_consumer.latest(), Some(0));
 
 		let mut track2 = Track::new("track2").produce();
 		producer.assert_insert_track(&track2);
 
 		let consumer2 = producer.consume();
-		let mut track2_consumer = consumer2.assert_consume_track(&Track::new("track2"));
-		track2_consumer.assert_no_group();
+		let track2_consumer = consumer2.assert_consume_track(&Track::new("track2"));
+		assert_eq!(track2_consumer.latest(), None);
 
 		track2.append_group().unwrap();
-
-		track2_consumer.assert_group();
+		assert_eq!(track2_consumer.latest(), Some(0));
 	}
 
 	#[tokio::test]
@@ -470,8 +469,8 @@ mod test {
 		let consumer2 = consumer.clone();
 
 		// consume_track with dynamic handler should create a producer and queue it.
-		let mut track1_consumer = consumer.assert_consume_track(&Track::new("track1"));
-		track1_consumer.assert_no_group();
+		let track1_consumer = consumer.assert_consume_track(&Track::new("track1"));
+		assert_eq!(track1_consumer.latest(), None);
 
 		// Get the request -- there should be exactly one.
 		let mut track1_producer = dynamic.assert_request();
@@ -479,16 +478,16 @@ mod test {
 		assert_eq!(track1_producer.info.name, "track1");
 
 		// Dedup: consuming the same track again should return the existing one.
-		let mut track1_dup = consumer2.assert_consume_track(&Track::new("track1"));
+		let track1_dup = consumer2.assert_consume_track(&Track::new("track1"));
 		track1_dup.assert_is_clone(&track1_consumer);
 
 		// No new request should be queued.
 		dynamic.assert_no_request();
 
-		// Append a group and make sure both get it.
+		// Append a group and make sure both see it.
 		track1_producer.append_group().unwrap();
-		track1_consumer.assert_group();
-		track1_dup.assert_group();
+		assert_eq!(track1_consumer.latest(), Some(0));
+		assert_eq!(track1_dup.latest(), Some(0));
 	}
 
 	#[tokio::test]
@@ -521,12 +520,12 @@ mod test {
 		tokio::time::advance(std::time::Duration::from_millis(1)).await;
 
 		// Subscribe again to the same track -- should get a new request.
-		let mut track2_consumer = consumer.assert_consume_track(&Track::new("track1"));
+		let track2_consumer = consumer.assert_consume_track(&Track::new("track1"));
 
 		let mut producer2 = dynamic.assert_request();
 
 		producer2.append_group().unwrap();
-		track2_consumer.assert_group();
+		assert_eq!(track2_consumer.latest(), Some(0));
 	}
 
 	#[tokio::test]

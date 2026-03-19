@@ -281,7 +281,7 @@ async fn serve_fetch(
 
 	// NOTE: The auth token is already scoped to the broadcast.
 	let broadcast = origin.consume_broadcast("").ok_or(StatusCode::NOT_FOUND)?;
-	let mut track = broadcast.consume_track(&track).map_err(|err| match err {
+	let track = broadcast.consume_track(&track).map_err(|err| match err {
 		moq_lite::Error::NotFound => StatusCode::NOT_FOUND,
 		_ => StatusCode::INTERNAL_SERVER_ERROR,
 	})?;
@@ -289,19 +289,22 @@ async fn serve_fetch(
 	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
 	let result = tokio::time::timeout_at(deadline, async {
+		let to_err = |_: moq_lite::Error| StatusCode::INTERNAL_SERVER_ERROR;
+
 		let group = match params.group {
 			FetchGroup::Latest => match track.latest() {
-				Some(sequence) => track.get_group(sequence).await,
-				None => track.recv_group().await,
+				Some(sequence) => track.get_group(sequence).await.map_err(to_err)?,
+				None => {
+					let mut sub = track
+						.subscribe(moq_lite::Subscription::default())
+						.await
+						.map_err(to_err)?;
+					sub.recv_group().await.map_err(to_err)?
+				}
 			},
-			FetchGroup::Num(sequence) => track.get_group(sequence).await,
-		};
-
-		let group = match group {
-			Ok(Some(group)) => group,
-			Ok(None) => return Err(StatusCode::NOT_FOUND),
-			Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-		};
+			FetchGroup::Num(sequence) => track.get_group(sequence).await.map_err(to_err)?,
+		}
+		.ok_or(StatusCode::NOT_FOUND)?;
 
 		tracing::info!(track = %track.info.name, group = %group.info.sequence, "serving group");
 

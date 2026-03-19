@@ -95,7 +95,8 @@ async fn main() -> anyhow::Result<()> {
 						(path, Some(broadcast)) => {
 							tracing::info!(broadcast = %path, "broadcast is online, subscribing to track");
 							let track = broadcast.consume_track(&track)?;
-							clock = Some(clock::Subscriber::new(track));
+							let subscriber = track.subscribe(Subscription::default()).await?;
+							clock = Some(clock::Subscriber::new(subscriber));
 						}
 						(path, None) => {
 							tracing::warn!(broadcast = %path, "broadcast is offline, waiting...");

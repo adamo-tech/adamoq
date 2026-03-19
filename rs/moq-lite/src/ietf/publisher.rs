@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::SendStream;
 
 use crate::{
-	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, Error, Origin, OriginConsumer, Subscription, Track, TrackSubscriber,
 	coding::{Stream, Writer},
 	ietf::{self, Control, FetchHeader, FetchType, FilterType, GroupOrder, Location, RequestId},
 	model::GroupConsumer,
@@ -122,6 +122,15 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 		};
 
+		let subscriber = match track.subscribe(Subscription::default()).await {
+			Ok(sub) => sub,
+			Err(err) => {
+				self.write_subscribe_error(&mut stream.writer, request_id, 404, &err.to_string())
+					.await?;
+				return Ok(());
+			}
+		};
+
 		// Send SubscribeOk on the stream
 		stream.writer.encode(&ietf::SubscribeOk::ID).await?;
 		stream
@@ -137,7 +146,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		// Run the track, cancelling on reader close (Unsubscribe or stream close)
 		let res = tokio::select! {
-			res = self.run_track(track, request_id) => res,
+			res = self.run_track(subscriber, request_id) => res,
 			_ = stream.reader.closed() => Ok(()),
 			_ = self.session.closed() => Ok(()),
 		};
@@ -212,7 +221,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	}
 
 	/// Serve a track using FuturesUnordered for unlimited concurrent groups.
-	async fn run_track(&self, mut track: TrackConsumer, request_id: RequestId) -> Result<(), Error> {
+	async fn run_track(&self, mut track: TrackSubscriber, request_id: RequestId) -> Result<(), Error> {
 		let mut tasks = FuturesUnordered::new();
 
 		loop {

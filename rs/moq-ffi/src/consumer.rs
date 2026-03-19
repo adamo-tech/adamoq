@@ -42,7 +42,7 @@ pub struct MoqMediaConsumer {
 }
 
 struct Media {
-	inner: hang::container::OrderedConsumer,
+	inner: hang::container::OrderedSubscriber,
 }
 
 impl Media {
@@ -74,9 +74,10 @@ impl Media {
 #[uniffi::export]
 impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
-	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
+	pub async fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let track = self.inner.consume_track(&hang::catalog::Catalog::default_track())?;
-		let consumer = hang::CatalogConsumer::from(track);
+		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
+		let consumer = hang::CatalogConsumer::new(subscriber);
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { inner: consumer }),
 		}))
@@ -85,10 +86,11 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to a media track by name, delivering frames in decode order.
 	///
 	/// `max_latency_ms` controls the maximum buffering before skipping a GoP.
-	pub fn subscribe_media(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqMediaConsumer>, MoqError> {
+	pub async fn subscribe_media(&self, name: String, max_latency_ms: u64) -> Result<Arc<MoqMediaConsumer>, MoqError> {
 		let track = self.inner.consume_track(&moq_lite::Track::new(name))?;
+		let subscriber = track.subscribe(moq_lite::Subscription::default()).await?;
 		let latency = std::time::Duration::from_millis(max_latency_ms);
-		let consumer = hang::container::OrderedConsumer::new(track, latency);
+		let consumer = hang::container::OrderedSubscriber::new(subscriber, latency);
 		Ok(Arc::new(MoqMediaConsumer {
 			task: Task::new(Media { inner: consumer }),
 		}))

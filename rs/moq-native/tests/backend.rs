@@ -69,9 +69,13 @@ async fn backend_test(scheme: &str, backend: moq_native::QuicBackend) {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
+	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
+	let mut subscriber = tokio::time::timeout(TIMEOUT, track_sub.subscribe(Default::default()))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
@@ -219,9 +223,13 @@ async fn iroh_connect() {
 	assert_eq!(path.as_str(), "test");
 	let bc = bc.expect("expected announce, got unannounce");
 
-	let mut track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
+	let track_sub = bc.consume_track(&Track::new("video")).expect("consume_track failed");
+	let mut subscriber = tokio::time::timeout(TIMEOUT, track_sub.subscribe(Default::default()))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")

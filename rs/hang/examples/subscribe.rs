@@ -50,7 +50,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 
 	// Read the catalog to discover available tracks.
 	let catalog_track = broadcast.consume_track(&hang::Catalog::default_track())?;
-	let mut catalog = hang::CatalogConsumer::new(catalog_track);
+	let catalog_sub = catalog_track.subscribe(moq_lite::Subscription::default()).await?;
+	let mut catalog = hang::CatalogConsumer::new(catalog_sub);
 
 	let info = catalog.next().await?.ok_or_else(|| anyhow::anyhow!("no catalog"))?;
 
@@ -74,7 +75,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	let track = moq_lite::Track::new(name.clone());
 
 	let track_consumer = broadcast.consume_track(&track)?;
-	let mut ordered = hang::container::OrderedConsumer::new(track_consumer, Duration::from_millis(500));
+	let track_sub = track_consumer.subscribe(moq_lite::Subscription::default()).await?;
+	let mut ordered = hang::container::OrderedSubscriber::new(track_sub, Duration::from_millis(500));
 
 	// Read frames in presentation order.
 	while let Some(frame) = ordered.read().await? {

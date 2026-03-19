@@ -5,7 +5,7 @@ use web_async::FuturesExt;
 use web_transport_trait::Stats;
 
 use crate::{
-	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Track, TrackConsumer,
+	AsPath, BroadcastConsumer, Error, Origin, OriginConsumer, Subscription, Track, TrackSubscriber,
 	coding::{Stream, Writer},
 	lite::{
 		self,
@@ -264,6 +264,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let broadcast = consumer.ok_or(Error::NotFound)?;
 		let track = broadcast.consume_track(&track)?;
+		let subscriber = track.subscribe(Subscription::default()).await?;
 
 		let info = lite::SubscribeOk {
 			priority: 0,
@@ -276,7 +277,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.writer.encode(&lite::SubscribeResponse::Ok(info)).await?;
 
 		tokio::select! {
-			res = Self::run_track(session, track, subscribe, priority, version) => res?,
+			res = Self::run_track(session, subscriber, subscribe, priority, version) => res?,
 			res = stream.reader.closed() => res?,
 		}
 
@@ -286,7 +287,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 	async fn run_track(
 		session: S,
-		mut track: TrackConsumer,
+		mut track: TrackSubscriber,
 		subscribe: &lite::Subscribe<'_>,
 		priority: PriorityQueue,
 		version: Version,
