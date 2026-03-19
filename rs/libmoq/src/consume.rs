@@ -57,14 +57,8 @@ impl Consume {
 		let id = self.catalog_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = async {
-				let catalog = broadcast
-					.subscribe_track(&hang::catalog::Catalog::default_track())
-					.await?;
-				Self::run_catalog(id, broadcast, catalog.into()).await
-			};
 			let res = tokio::select! {
-				res = res => res,
+				res = Self::run_catalog(id, broadcast) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -77,11 +71,11 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_catalog(
-		task_id: Id,
-		broadcast: moq_lite::BroadcastConsumer,
-		mut catalog: hang::CatalogConsumer,
-	) -> Result<(), Error> {
+	async fn run_catalog(task_id: Id, broadcast: moq_lite::BroadcastConsumer) -> Result<(), Error> {
+		let track = broadcast
+			.subscribe_track(&hang::catalog::Catalog::default_track())
+			.await?;
+		let mut catalog = hang::CatalogConsumer::from(track);
 		while let Some(catalog) = catalog.next().await? {
 			// Unfortunately we need to store the codec information on the heap.
 			let audio_codec = catalog
@@ -233,13 +227,8 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = async {
-				let track = broadcast.subscribe_track(&track_info).await?;
-				let track = hang::container::OrderedConsumer::new(track, latency);
-				Self::run_track(id, track).await
-			};
 			let res = tokio::select! {
-				res = res => res,
+				res = Self::run_track(id, broadcast, &track_info, latency) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -279,13 +268,8 @@ impl Consume {
 		let id = self.track_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = async {
-				let track = broadcast.subscribe_track(&track_info).await?;
-				let track = hang::container::OrderedConsumer::new(track, latency);
-				Self::run_track(id, track).await
-			};
 			let res = tokio::select! {
-				res = res => res,
+				res = Self::run_track(id, broadcast, &track_info, latency) => res,
 				_ = channel.1 => Ok(()),
 			};
 
@@ -298,7 +282,14 @@ impl Consume {
 		Ok(id)
 	}
 
-	async fn run_track(task_id: Id, mut track: hang::container::OrderedConsumer) -> Result<(), Error> {
+	async fn run_track(
+		task_id: Id,
+		broadcast: moq_lite::BroadcastConsumer,
+		track_info: &moq_lite::Track,
+		latency: std::time::Duration,
+	) -> Result<(), Error> {
+		let track = broadcast.subscribe_track(track_info).await?;
+		let mut track = hang::container::OrderedConsumer::new(track, latency);
 		while let Some(mut ordered) = track.read().await? {
 			// TODO add a chunking API so we don't have to (potentially) allocate a contiguous buffer for the frame.
 			let mut new_payload = hang::container::BufList::new();
