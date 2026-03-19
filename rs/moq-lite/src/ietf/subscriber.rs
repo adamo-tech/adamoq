@@ -454,7 +454,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					entry.remove();
 				}
 			}
-			Entry::Vacant(_) => return Err(Error::NotFound),
+			Entry::Vacant(_) => return Err(Error::UnknownBroadcast),
 		};
 
 		Ok(())
@@ -676,7 +676,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					RequestId(group.track_alias)
 				}
 			};
-			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
+			let track = state.subscribes.get_mut(&request_id).ok_or(Error::UnknownTrack)?;
 
 			let group = Group {
 				sequence: group.group_id,

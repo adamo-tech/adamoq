@@ -132,7 +132,7 @@ impl BroadcastProducer {
 	/// Remove a track from the lookup.
 	pub fn remove_track(&mut self, name: &str) -> Result<(), Error> {
 		let mut state = modify(&self.state)?;
-		state.tracks.remove(name).ok_or(Error::NotFound)?;
+		state.tracks.remove(name).ok_or(Error::UnknownTrack)?;
 		Ok(())
 	}
 
@@ -361,7 +361,7 @@ impl BroadcastConsumer {
 		}
 
 		if state.dynamic == 0 {
-			return Err(Error::NotFound);
+			return Err(Error::UnknownTrack);
 		}
 
 		// Create a new TrackProducer, insert into lookup, and queue for dynamic handler.

@@ -113,7 +113,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
 					// Abort the producer.
-					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::NotFound)?;
+					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::UnknownBroadcast)?;
 					producer.abort(Error::Cancel).ok();
 				}
 			}

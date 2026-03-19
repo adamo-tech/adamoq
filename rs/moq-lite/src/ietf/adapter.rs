@@ -636,7 +636,7 @@ impl<S: web_transport_trait::Session> ControlStreamAdapter<S> {
 			.unwrap()
 			.get(&ns)
 			.copied()
-			.ok_or(Error::NotFound)
+			.ok_or(Error::UnknownBroadcast)
 	}
 }
 

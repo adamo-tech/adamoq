@@ -262,7 +262,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	) -> Result<(), Error> {
 		let track = Track::new(subscribe.track.to_string());
 
-		let broadcast = consumer.ok_or(Error::NotFound)?;
+		let broadcast = consumer.ok_or(Error::UnknownBroadcast)?;
 		let track = broadcast.consume_track(&track)?;
 		let subscriber = track.subscribe(Subscription::default()).await?;
 
