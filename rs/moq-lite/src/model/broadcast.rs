@@ -344,11 +344,7 @@ impl Deref for BroadcastConsumer {
 }
 
 impl BroadcastConsumer {
-	/// Look up a track by name, returning its consumer if active.
-	///
-	/// If the track doesn't exist and a dynamic handler is registered,
-	/// a [`TrackProducer`] is created, inserted, and queued for the handler.
-	/// The returned [`TrackConsumer`] is connected to that producer.
+	/// Returns the track if it exists, otherwise tries to route it to [`BroadcastDynamic`].
 	pub fn consume_track(&self, track: &Track) -> Result<TrackConsumer, Error> {
 		let producer = self
 			.state
