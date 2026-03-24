@@ -106,8 +106,7 @@ struct WaiterFn<F, R> {
 /// [`WaiterList`] remains valid until the next poll replaces it.
 pub fn wait<F, R>(poll: F) -> impl Future<Output = R>
 where
-	F: FnMut(&Waiter) -> Poll<R> + Unpin,
-	R: Unpin,
+	F: FnMut(&Waiter) -> Poll<R>,
 {
 	WaiterFn {
 		poll,
@@ -118,13 +117,14 @@ where
 
 impl<F, R> Future for WaiterFn<F, R>
 where
-	F: FnMut(&Waiter) -> Poll<R> + Unpin,
-	R: Unpin,
+	F: FnMut(&Waiter) -> Poll<R>,
 {
 	type Output = R;
 
-	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
-		let this = &mut *self;
+	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<R> {
+		// SAFETY: We never move `poll` out of the pinned struct — we only
+		// call it in place via `&mut`. `waiter` and `_marker` are `Unpin`.
+		let this = unsafe { self.get_unchecked_mut() };
 		this.waiter = Some(Waiter::new(cx.waker().clone()));
 		(this.poll)(this.waiter.as_ref().unwrap())
 	}

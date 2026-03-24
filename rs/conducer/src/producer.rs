@@ -111,8 +111,7 @@ impl<T> Producer<T> {
 	/// read-only access to the final state if the channel closes first.
 	pub async fn wait<F, R>(&self, mut f: F) -> Result<R, Ref<'_, T>>
 	where
-		F: FnMut(&mut Mut<'_, T>) -> Poll<R> + Unpin,
-		R: Unpin,
+		F: FnMut(&mut Mut<'_, T>) -> Poll<R>,
 	{
 		crate::wait(move |waiter| self.poll(waiter, &mut f)).await
 	}
