@@ -110,3 +110,33 @@ impl Container for hang::catalog::AudioConfig {
 		}
 	}
 }
+
+/// A media track that can be either video or audio.
+#[cfg(feature = "mp4")]
+pub enum Media {
+	Video(hang::catalog::VideoConfig),
+	Audio(hang::catalog::AudioConfig),
+}
+
+#[cfg(feature = "mp4")]
+impl Container for Media {
+	type Error = crate::Error;
+
+	fn write(&self, group: &mut moq_lite::GroupProducer, frames: &[Frame]) -> Result<(), Self::Error> {
+		match self {
+			Self::Video(c) => c.write(group, frames),
+			Self::Audio(c) => c.write(group, frames),
+		}
+	}
+
+	fn poll_read(
+		&self,
+		group: &mut moq_lite::GroupConsumer,
+		waiter: &conducer::Waiter,
+	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		match self {
+			Self::Video(c) => c.poll_read(group, waiter),
+			Self::Audio(c) => c.poll_read(group, waiter),
+		}
+	}
+}

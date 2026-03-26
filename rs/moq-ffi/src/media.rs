@@ -35,7 +35,10 @@ impl TryFrom<MoqVideo> for hang::catalog::VideoConfig {
 
 	fn try_from(v: MoqVideo) -> Result<Self, Self::Error> {
 		Ok(Self {
-			codec: v.codec.parse().map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
+			codec: v
+				.codec
+				.parse()
+				.map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
 			description: v.description.map(bytes::Bytes::from),
 			coded_width: v.coded.as_ref().map(|d| d.width),
 			coded_height: v.coded.as_ref().map(|d| d.height),
@@ -55,7 +58,10 @@ impl TryFrom<MoqAudio> for hang::catalog::AudioConfig {
 
 	fn try_from(a: MoqAudio) -> Result<Self, Self::Error> {
 		Ok(Self {
-			codec: a.codec.parse().map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
+			codec: a
+				.codec
+				.parse()
+				.map_err(|e: hang::Error| crate::error::MoqError::Codec(e.to_string()))?,
 			description: a.description.map(bytes::Bytes::from),
 			sample_rate: a.sample_rate,
 			channel_count: a.channel_count,

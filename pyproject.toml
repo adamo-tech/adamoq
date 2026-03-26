@@ -7,6 +7,9 @@ requires-python = ">=3.10"
 members = ["py/*"]
 exclude = ["py/common"]
 
+[tool.uv.sources]
+moq-ffi = { path = "rs/moq-ffi" }
+
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright"]
 

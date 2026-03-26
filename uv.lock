@@ -94,15 +94,7 @@ dev = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.1.3"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/05/bf/74f7d3052a5b8f7ad867dd912de8d41844cc20fc2f5f40b4fd1cd2455007/moq_ffi-0.1.3-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:4271d6b8a712879363ab9649a062e7dc5803aa4e9bc18370ef444f457035f176", size = 5545834, upload-time = "2026-03-16T23:22:07.816Z" },
-    { url = "https://files.pythonhosted.org/packages/32/94/1092efe567e197d315e7bd64bdae68b3e2f7874c3ea062c23e654b646655/moq_ffi-0.1.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:770bafc5fec9753947d565e21a73a8c864f816fca46a3deb293c5e6367b32574", size = 5248815, upload-time = "2026-03-16T23:22:09.414Z" },
-    { url = "https://files.pythonhosted.org/packages/cd/23/5da1aca8f22a836b9b193c837700ec0f8af8e1bd96c4a2f5852d1c143e20/moq_ffi-0.1.3-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e03a74efde6d630a196ce2fb01df1bdedf639e0a7ecf64f618d60474c650c4c2", size = 5887901, upload-time = "2026-03-16T23:22:11.262Z" },
-    { url = "https://files.pythonhosted.org/packages/d1/c1/9c8587396237bd97b1dd479682c505a0738bdca8f60b6e8b4174e2a3bc55/moq_ffi-0.1.3-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:d0204a9178ac4f368a595ca50f0937460c10afaf1b743d6b2e7ed3b80e12f379", size = 5905279, upload-time = "2026-03-16T23:22:13.176Z" },
-    { url = "https://files.pythonhosted.org/packages/46/20/58d5e02b41002716b04116995e111998a96dce079b3c444c9df6a0dc99af/moq_ffi-0.1.3-py3-none-win_amd64.whl", hash = "sha256:e73fea93478fcee6af7ffab85092adced93d6200f8966385094021c349c22a17", size = 4450056, upload-time = "2026-03-16T23:22:14.736Z" },
-]
+source = { directory = "rs/moq-ffi" }
 
 [[package]]
 name = "moq-lite"
@@ -119,7 +111,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "moq-ffi", specifier = ">=0.1.2" }]
+requires-dist = [{ name = "moq-ffi", directory = "rs/moq-ffi" }]
 
 [package.metadata.requires-dev]
 dev = [
