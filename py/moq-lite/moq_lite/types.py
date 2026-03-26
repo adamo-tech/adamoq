@@ -1,6 +1,9 @@
 """Re-export moq-ffi record types without the Moq prefix."""
 
 from moq_ffi import (
+    Container,
+)
+from moq_ffi import (
     MoqAudio as Audio,
 )
 from moq_ffi import (
@@ -16,4 +19,4 @@ from moq_ffi import (
     MoqVideo as Video,
 )
 
-__all__ = ["Audio", "Catalog", "Dimensions", "Frame", "Video"]
+__all__ = ["Audio", "Catalog", "Container", "Dimensions", "Frame", "Video"]

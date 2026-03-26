@@ -98,7 +98,7 @@ source = { directory = "rs/moq-ffi" }
 
 [[package]]
 name = "moq-lite"
-version = "0.0.1"
+version = "0.1.0"
 source = { editable = "py/moq-lite" }
 dependencies = [
     { name = "moq-ffi" },

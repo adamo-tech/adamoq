@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from moq_ffi import MoqBroadcastConsumer, MoqCatalogConsumer, MoqMediaConsumer
 
-from .types import Audio, Catalog, Frame, Video
+from .types import Catalog, Container, Frame
 
 
 class MediaConsumer:
@@ -54,15 +54,8 @@ class BroadcastConsumer:
     def subscribe_catalog(self) -> CatalogConsumer:
         return CatalogConsumer(self._inner.subscribe_catalog())
 
-    def subscribe_video(self, name: str, config: Video, max_latency_ms: int = 10_000) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_video(name, config, max_latency_ms))
-
-    def subscribe_audio(self, name: str, config: Audio, max_latency_ms: int = 10_000) -> MediaConsumer:
-        return MediaConsumer(self._inner.subscribe_audio(name, config, max_latency_ms))
-
-    def subscribe_media(self, name: str, max_latency_ms: int = 10_000) -> MediaConsumer:
-        """Deprecated: Use subscribe_video or subscribe_audio instead."""
-        return MediaConsumer(self._inner.subscribe_media(name, max_latency_ms))
+    def subscribe_media(self, name: str, container: Container, max_latency_ms: int) -> MediaConsumer:
+        return MediaConsumer(self._inner.subscribe_media(name, container, max_latency_ms))
 
     async def catalog(self) -> Catalog:
         """Convenience: subscribe and return the first catalog."""

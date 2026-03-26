@@ -1222,30 +1222,17 @@ mod tests {
 		assert_eq!(frames.len(), 1);
 	}
 
-	// ---- VideoConfig Container ----
+	// ---- hang::catalog::Container ----
 
 	#[cfg(feature = "mp4")]
 	#[tokio::test]
 	async fn video_config_legacy() {
 		tokio::time::pause();
 
-		let config = hang::catalog::VideoConfig {
-			codec: "avc1.64001f".parse().unwrap(),
-			container: hang::catalog::Container::Legacy,
-			description: None,
-			coded_width: None,
-			coded_height: None,
-			display_ratio_width: None,
-			display_ratio_height: None,
-			bitrate: None,
-			framerate: None,
-			optimize_for_latency: None,
-			jitter: None,
-		};
-
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = track.consume();
-		let mut consumer = Consumer::new(consumer_track, config).with_latency(Duration::from_millis(500));
+		let mut consumer =
+			Consumer::new(consumer_track, hang::catalog::Container::Legacy).with_latency(Duration::from_millis(500));
 
 		// Write frames using Legacy encoding
 		let mut group = track.create_group(moq_lite::Group { sequence: 0 }).unwrap();
