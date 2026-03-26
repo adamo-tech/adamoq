@@ -2,7 +2,6 @@
 
 # Using Just: https://github.com/casey/just?tab=readme-ov-file#installation
 
-set quiet
 
 # List all of the available commands.
 default:
@@ -89,7 +88,7 @@ auth-key:
 # root.jwt - allows publishing and subscribing to all paths
 auth-token: auth-key
 	@if [ ! -f "dev/demo-web.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--subscribe "" \
 			--publish "me" \
@@ -97,14 +96,14 @@ auth-token: auth-key
 	fi
 
 	@if [ ! -f "dev/demo-cli.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "demo" \
 			--publish "" \
 			> dev/demo-cli.jwt ; \
 	fi
 
 	@if [ ! -f "dev/root.jwt" ]; then \
-		cargo run --quiet --bin moq-token-cli -- --key "dev/root.jwk" sign \
+		cargo run --bin moq-token-cli -- --key "dev/root.jwk" sign \
 			--root "" \
 			--subscribe "" \
 			--publish "" \
@@ -328,7 +327,6 @@ check:
 		bun run --filter='*' check
 	fi
 	bun biome check
-	echo "JS checks passed."
 
 	# Run the (slower) Rust checks.
 	cargo check --all-targets
@@ -342,21 +340,20 @@ check:
 	cargo shear
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace --check > /dev/null
+	cargo sort --workspace --check
 
 	# Run the Python checks.
 	if command -v uv &> /dev/null; then
 		uv run ruff check py/
 		uv run ruff format --check py/
 		uv run --package moq-lite pyright
-		echo "Python checks passed."
 	fi
 
 	# Only run the tofu checks if tofu is installed.
 	if command -v tofu &> /dev/null; then (cd cdn && just check); fi
 
 	# Only run the nix checks if nix is installed.
-	if command -v nix &> /dev/null; then nix flake check --quiet; fi
+	if command -v nix &> /dev/null; then nix flake check; fi
 
 # Run comprehensive CI checks including all feature combinations (requires cargo-hack)
 ci:
@@ -405,7 +402,6 @@ test *args:
 	if command -v uv &> /dev/null; then
 		uv run maturin develop -m rs/moq-ffi/Cargo.toml --uv
 		uv run --package moq-lite pytest py/moq-lite/tests/
-		echo "Python tests passed."
 	fi
 
 # Automatically fix some issues.
@@ -413,7 +409,6 @@ fix:
 	# Fix the Javascript dependencies.
 	bun install --silent
 	bun biome check --write
-	echo "JS fixes applied."
 
 	# Fix the Rust issues.
 	cargo clippy --fix --allow-staged --allow-dirty --all-targets
@@ -423,7 +418,7 @@ fix:
 	cargo shear --fix
 
 	# requires: cargo install cargo-sort
-	cargo sort --workspace > /dev/null
+	cargo sort --workspace
 
 	# Fix the Python issues.
 	if command -v uv &> /dev/null; then uv run ruff check --fix py/ && uv run ruff format py/; fi
@@ -454,7 +449,7 @@ build:
 	set -euo pipefail
 
 	bun run --filter='*' build
-	cargo build --quiet
+	cargo build
 
 	# Build moq-ffi from source into py/moq-lite's venv.
 	if command -v uv &> /dev/null; then
