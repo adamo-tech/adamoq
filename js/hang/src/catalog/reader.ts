@@ -48,6 +48,7 @@ export class CatalogReader {
 								signal.set(parsed);
 							} catch (err) {
 								console.warn(`invalid catalog section "${name}"`, err);
+								signal.set(undefined);
 							}
 						} else {
 							signal.set(undefined);

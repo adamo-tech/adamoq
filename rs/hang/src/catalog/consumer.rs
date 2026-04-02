@@ -47,28 +47,31 @@ impl CatalogConsumer {
 	///
 	/// This method blocks until the track is closed.
 	pub async fn run(&mut self) -> Result<()> {
-		loop {
-			tokio::select! {
-				res = self.track.recv_group() => {
-					match res? {
-						Some(group) => {
-							self.group = Some(group);
+		let result = async {
+			loop {
+				tokio::select! {
+					res = self.track.recv_group() => {
+						match res? {
+							Some(group) => {
+								self.group = Some(group);
+							}
+							None => return Ok(()),
 						}
-						None => {
-							self.reader.close();
-							return Ok(());
-						}
-					}
-				},
-				Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
-					self.group.take(); // We don't support deltas yet
+					},
+					Some(frame) = async { self.group.as_mut()?.read_frame().await.transpose() } => {
+						self.group.take(); // We don't support deltas yet
 
-					let json: serde_json::Map<String, serde_json::Value> =
-						serde_json::from_slice(&frame?)?;
-					self.reader.update(json);
+						let json: serde_json::Map<String, serde_json::Value> =
+							serde_json::from_slice(&frame?)?;
+						self.reader.update(json);
+					}
 				}
 			}
 		}
+		.await;
+
+		self.reader.close();
+		result
 	}
 
 	/// Wait until the catalog track is closed.
