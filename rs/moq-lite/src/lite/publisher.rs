@@ -321,22 +321,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			// Cancel groups that are more than 3 behind the new one.
-			// This frees cwnd for newer data instead of retransmitting stale groups.
-			// Threshold of 3 allows normal GOP overlap while catching truly stuck groups.
-			let mut cancelled = 0;
-			active_groups.retain(|(seq, handle)| {
-				if sequence > *seq + 3 {
-					handle.abort();
-					cancelled += 1;
-					false
-				} else {
-					true
-				}
-			});
-			if cancelled > 0 {
-				tracing::info!(sequence, cancelled, "cancelled {} stale group(s)", cancelled);
-			}
+			// Clean up finished group handles (don't cancel — let delivery timeout handle stale groups)
+			active_groups.retain(|(_, handle)| !handle.is_finished());
 
 			let priority = priority.insert(track.info.priority, sequence);
 			let concurrent = tasks.len();
