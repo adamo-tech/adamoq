@@ -13,6 +13,9 @@ export type SourceProps = {
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 	target?: Target | Signal<Target | undefined>;
 	supported?: Supported;
+
+	// Enable ABR: automatically select rendition based on probe bitrate.
+	abr?: boolean | Signal<boolean>;
 };
 
 export type Target = {
@@ -158,6 +161,13 @@ export class Source {
 	#config = new Signal<Catalog.VideoConfig | undefined>(undefined);
 	readonly config: Getter<Catalog.VideoConfig | undefined> = this.#config;
 
+	// ABR: estimated receive bitrate from probe messages.
+	#probeBitrate = new Signal<number | undefined>(undefined);
+	readonly probeBitrate: Getter<number | undefined> = this.#probeBitrate;
+
+	// Whether ABR is enabled.
+	abr: Signal<boolean>;
+
 	sync: Sync;
 	supported: Signal<Supported | undefined>;
 
@@ -166,12 +176,14 @@ export class Source {
 	constructor(sync: Sync, props?: SourceProps) {
 		this.broadcast = Signal.from(props?.broadcast);
 		this.target = Signal.from(props?.target);
+		this.abr = Signal.from(props?.abr ?? false);
 		this.sync = sync;
 		this.supported = Signal.from(props?.supported);
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runSupported.bind(this));
 		this.#signals.run(this.#runSelected.bind(this));
+		this.#signals.run(this.#runProbe.bind(this));
 	}
 
 	#runCatalog(effect: Effect): void {
@@ -206,15 +218,41 @@ export class Source {
 		});
 	}
 
+	#runProbe(effect: Effect): void {
+		const abrEnabled = effect.get(this.abr);
+		if (!abrEnabled) return;
+
+		const broadcast = effect.get(this.broadcast);
+		if (!broadcast) return;
+
+		const conn = effect.get(broadcast.connection);
+		if (!conn) return;
+
+		// Listen for probe rate updates via the callback.
+		conn.onRecvRate = (rate) => {
+			this.#probeBitrate.set(rate);
+		};
+
+		// Read the current value if already available.
+		if (conn.estimatedRecvRate != null) {
+			effect.set(this.#probeBitrate, conn.estimatedRecvRate, undefined);
+		}
+
+		effect.cleanup(() => {
+			conn.onRecvRate = undefined;
+		});
+	}
+
 	#runSelected(effect: Effect): void {
 		const available = effect.get(this.#available);
 		if (Object.keys(available).length === 0) return;
 
 		const target = effect.get(this.target);
+		const probeBitrate = effect.get(this.#probeBitrate);
 
 		// Manual selection by name
 		const manual = target?.name;
-		const selected = manual && manual in available ? manual : this.#select(available, target);
+		const selected = manual && manual in available ? manual : this.#select(available, target, probeBitrate);
 		if (!selected) return;
 
 		const config = available[selected];
@@ -231,7 +269,11 @@ export class Source {
 	 * The first rendition present in every filter's output is selected.
 	 * If no rendition satisfies all filters, a warning is logged.
 	 */
-	#select(renditions: Record<string, Catalog.VideoConfig>, target?: Target): string | undefined {
+	#select(
+		renditions: Record<string, Catalog.VideoConfig>,
+		target?: Target,
+		probeBitrate?: number,
+	): string | undefined {
 		const entries = Object.entries(renditions);
 		if (entries.length === 0) return undefined;
 		if (entries.length === 1) return entries[0][0];
@@ -244,6 +286,11 @@ export class Source {
 		}
 		if (target?.bitrate != null) {
 			filters.push(byBitrate(target.bitrate));
+		}
+
+		// ABR: use probe bitrate to constrain rendition selection.
+		if (probeBitrate != null && target?.bitrate == null) {
+			filters.push(byBitrate(probeBitrate));
 		}
 
 		// No filters — pick the best rendition by quality.

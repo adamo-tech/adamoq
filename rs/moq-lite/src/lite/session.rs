@@ -1,3 +1,5 @@
+use std::sync::{Arc, atomic};
+
 use crate::{Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
 
 use super::{Publisher, Subscriber, Version};
@@ -13,9 +15,21 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	// The version of the protocol to use.
 	version: Version,
-) -> Result<(), Error> {
+) -> Result<Arc<atomic::AtomicU64>, Error> {
+	start_with_rate(session, setup, publish, subscribe, version)
+}
+
+pub(crate) fn start_with_rate<S: web_transport_trait::Session>(
+	session: S,
+	setup: Option<Stream<S, Version>>,
+	publish: Option<OriginConsumer>,
+	subscribe: Option<OriginProducer>,
+	version: Version,
+) -> Result<Arc<atomic::AtomicU64>, Error> {
+	let estimated_recv_rate = Arc::new(atomic::AtomicU64::new(0));
+
 	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, version, estimated_recv_rate.clone());
 
 	web_async::spawn(async move {
 		let res = tokio::select! {
@@ -40,7 +54,7 @@ pub fn start<S: web_transport_trait::Session>(
 		}
 	});
 
-	Ok(())
+	Ok(estimated_recv_rate)
 }
 
 // TODO do something useful with this

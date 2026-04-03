@@ -7,6 +7,7 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
+import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -26,6 +27,10 @@ export class Subscriber {
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
 
+	// The estimated receive bitrate from probe messages (bits/second), or undefined if unknown.
+	#estimatedRecvRate: number | undefined;
+	#onRecvRate: ((rate: number | undefined) => void) | undefined;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
@@ -35,6 +40,39 @@ export class Subscriber {
 	constructor(quic: WebTransport, version: Version) {
 		this.#quic = quic;
 		this.version = version;
+
+		if (this.version === Version.DRAFT_03) {
+			void this.#runProbe();
+		}
+	}
+
+	/**
+	 * The estimated receive bitrate in bits/second, derived from probe messages.
+	 */
+	get estimatedRecvRate(): number | undefined {
+		return this.#estimatedRecvRate;
+	}
+
+	set onRecvRate(fn: ((rate: number | undefined) => void) | undefined) {
+		this.#onRecvRate = fn;
+	}
+
+	async #runProbe(): Promise<void> {
+		try {
+			const stream = await Stream.open(this.#quic);
+			await stream.writer.u53(StreamId.Probe);
+
+			for (;;) {
+				const probe = await Probe.decodeMaybe(stream.reader, this.version);
+				if (!probe) break;
+
+				this.#estimatedRecvRate = probe.bitrate;
+				this.#onRecvRate?.(probe.bitrate);
+			}
+		} catch (err: unknown) {
+			// Probe stream failed — not fatal, just means no rate estimation.
+			console.debug(`probe recv error: ${error(err).message}`);
+		}
 	}
 
 	/**

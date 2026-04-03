@@ -23,24 +23,57 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
+
+	/// Shared estimated receive bitrate from probe messages (bits/second).
+	/// Stored as bits/second; 0 means no probe data received yet.
+	estimated_recv_rate: Arc<atomic::AtomicU64>,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginProducer>,
+		version: Version,
+		estimated_recv_rate: Arc<atomic::AtomicU64>,
+	) -> Self {
 		Self {
 			session,
 			origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
+			estimated_recv_rate,
 		}
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
+			_ = self.clone().run_probe() => Ok(()),
 			res = self.run_uni() => res,
 		}
+	}
+
+	async fn run_probe(self) {
+		if !matches!(self.version, Version::Lite03) {
+			return;
+		}
+
+		match self.run_probe_inner().await {
+			Ok(()) => tracing::debug!("probe stream closed"),
+			Err(err) => tracing::debug!(%err, "probe stream error"),
+		}
+	}
+
+	async fn run_probe_inner(&self) -> Result<(), Error> {
+		let mut stream = Stream::open(&self.session, self.version).await?;
+		stream.writer.encode(&lite::ControlType::Probe).await?;
+
+		while let Some(probe) = stream.reader.decode_maybe::<lite::Probe>().await? {
+			self.estimated_recv_rate.store(probe.bitrate, atomic::Ordering::Relaxed);
+		}
+
+		Ok(())
 	}
 
 	async fn run_uni(self) -> Result<(), Error> {

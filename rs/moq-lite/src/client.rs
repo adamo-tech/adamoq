@@ -97,7 +97,7 @@ impl Client {
 					.ok_or(Error::Version)?;
 
 				// Starting with draft-03, there's no more SETUP control stream.
-				lite::start(
+				let recv_rate = lite::start(
 					session.clone(),
 					None,
 					self.publish.clone(),
@@ -105,7 +105,7 @@ impl Client {
 					lite::Version::Lite03,
 				)?;
 
-				return Ok(Session::new(session, lite::Version::Lite03.into()));
+				return Ok(Session::new(session, lite::Version::Lite03.into()).with_recv_rate(recv_rate));
 			}
 			Some(ALPN_LITE) | None => {
 				let supported = self.versions.filter(&NEGOTIATED.into()).ok_or(Error::Version)?;
@@ -139,16 +139,16 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		match version {
+		let recv_rate = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
-				lite::start(
+				Some(lite::start(
 					session.clone(),
 					Some(stream),
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
-				)?;
+				)?)
 			}
 			Version::Ietf(v) => {
 				// Decode the parameters to get the initial request ID.
@@ -167,10 +167,16 @@ impl Client {
 					self.consume.clone(),
 					v,
 				)?;
+				None
 			}
-		}
+		};
 
-		Ok(Session::new(session, version))
+		let session = Session::new(session, version);
+		Ok(if let Some(rate) = recv_rate {
+			session.with_recv_rate(rate)
+		} else {
+			session
+		})
 	}
 }
 

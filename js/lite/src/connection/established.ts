@@ -12,4 +12,10 @@ export interface Established {
 	consume(broadcast: Path.Valid): Broadcast;
 	close(): void;
 	closed: Promise<void>;
+
+	/** Estimated receive bitrate in bits/second from probe messages, or undefined if unavailable. */
+	readonly estimatedRecvRate?: number | undefined;
+
+	/** Callback invoked when the estimated receive rate changes. */
+	onRecvRate?: ((rate: number | undefined) => void) | undefined;
 }

@@ -42,6 +42,10 @@ export class Connection implements Established {
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
+	// The estimated receive bitrate in bits/second, from probe messages.
+	#estimatedRecvRate: number | undefined;
+	#onRecvRate: ((rate: number | undefined) => void) | undefined;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -60,7 +64,27 @@ export class Connection implements Established {
 		this.#publisher = new Publisher(this.#quic, this.#version);
 		this.#subscriber = new Subscriber(this.#quic, this.#version);
 
+		this.#subscriber.onRecvRate = (rate) => {
+			this.#estimatedRecvRate = rate;
+			this.#onRecvRate?.(rate);
+		};
+
 		this.#run();
+	}
+
+	/**
+	 * The estimated receive bitrate in bits/second, derived from probe messages.
+	 * Returns undefined if no probe data is available.
+	 */
+	get estimatedRecvRate(): number | undefined {
+		return this.#estimatedRecvRate;
+	}
+
+	/**
+	 * Set a callback to be notified when the estimated receive rate changes.
+	 */
+	set onRecvRate(fn: ((rate: number | undefined) => void) | undefined) {
+		this.#onRecvRate = fn;
 	}
 
 	/**
