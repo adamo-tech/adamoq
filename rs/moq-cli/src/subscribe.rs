@@ -42,7 +42,8 @@ impl Subscribe {
 		let converter = moq_mux::cmaf::Convert::new(self.broadcast, cmaf_output);
 
 		// Subscribe to the catalog before the converter starts, so we don't miss it.
-		let catalog_track = cmaf_consumer.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
+		let catalog_track =
+			cmaf_consumer.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 
 		let max_latency = std::time::Duration::from_millis(self.args.max_latency);
 
@@ -87,10 +88,10 @@ async fn mux_fmp4(
 	let mut muxer_tracks = Vec::new();
 
 	for (name, config) in &video.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 1,
-		}, moq_lite::Subscription::default())?;
+		let track = cmaf_consumer.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,
@@ -105,10 +106,10 @@ async fn mux_fmp4(
 	}
 
 	for (name, config) in &audio.renditions {
-		let track = cmaf_consumer.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 2,
-		}, moq_lite::Subscription::default())?;
+		let track = cmaf_consumer.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		let timescale = match &config.container {
 			hang::catalog::Container::Cmaf { init_data } => parse_timescale_from_init(init_data)?,

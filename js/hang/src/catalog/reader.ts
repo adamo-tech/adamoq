@@ -1,6 +1,6 @@
 import type * as Moq from "@moq/lite";
 import { type Effect, type Getter, Signal } from "@moq/signals";
-import type { z } from "zod";
+import type { z } from "zod/mini";
 import type { Section } from "./section";
 
 /// A catalog reader that provides per-section change notifications.
@@ -11,7 +11,7 @@ import type { Section } from "./section";
 /// their specific section's value actually changed.
 export class CatalogReader {
 	// biome-ignore lint/suspicious/noExplicitAny: we store heterogeneous section types
-	#sections = new Map<string, { schema: z.ZodType<any>; signal: Signal<any> }>();
+	#sections = new Map<string, { schema: z.ZodMiniType<any>; signal: Signal<any> }>();
 
 	/// Register interest in a section. Returns a Getter<T | undefined>.
 	///

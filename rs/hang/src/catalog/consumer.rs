@@ -10,10 +10,7 @@ pub const DEFAULT_TRACK_PRIORITY: u8 = 100;
 
 /// Returns the default track descriptor for the catalog.
 pub fn default_track() -> moq_lite::Track {
-	moq_lite::Track {
-		name: DEFAULT_TRACK_NAME.to_string(),
-		priority: DEFAULT_TRACK_PRIORITY,
-	}
+	moq_lite::Track::new(DEFAULT_TRACK_NAME)
 }
 
 /// A catalog consumer that reads JSON frames from a MoQ track and

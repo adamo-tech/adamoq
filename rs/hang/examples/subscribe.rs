@@ -44,7 +44,8 @@ async fn run_subscribe(mut consumer: moq_lite::OriginConsumer) -> anyhow::Result
 	tracing::info!(%path, "broadcast announced");
 
 	// Read the catalog to discover available tracks.
-	let catalog_track = broadcast.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
+	let catalog_track =
+		broadcast.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 	let mut catalog = hang::CatalogConsumer::new(catalog_track);
 
 	// Register interest in the video section

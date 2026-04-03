@@ -109,7 +109,9 @@ impl MoqBroadcastConsumer {
 	/// Subscribe to the catalog for this broadcast.
 	pub fn subscribe_catalog(&self) -> Result<Arc<MoqCatalogConsumer>, MoqError> {
 		let _guard = crate::ffi::RUNTIME.enter();
-		let track = self.inner.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
+		let track = self
+			.inner
+			.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 		Ok(Arc::new(MoqCatalogConsumer {
 			task: Task::new(Catalog { track, group: None }),
 		}))

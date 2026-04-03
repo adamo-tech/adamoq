@@ -22,7 +22,6 @@ impl CatalogProducer {
 		let hang_track = broadcast.create_track(hang::catalog::default_track())?;
 		let msf_track = broadcast.create_track(moq_lite::Track {
 			name: moq_msf::DEFAULT_NAME.to_string(),
-			priority: 100,
 		})?;
 
 		Ok(Self {

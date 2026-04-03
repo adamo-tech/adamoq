@@ -32,7 +32,8 @@ impl Convert {
 		let mut catalog_producer = crate::CatalogProducer::new(&broadcast)?;
 
 		// Subscribe to the input catalog
-		let catalog_track = input.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
+		let catalog_track =
+			input.subscribe_track(&hang::catalog::default_track(), moq_lite::Subscription::default())?;
 
 		let mut catalog_consumer = hang::CatalogConsumer::new(catalog_track);
 		let video_section = catalog_consumer.reader().section(&VIDEO);
@@ -65,19 +66,16 @@ async fn run_with_catalog(
 
 	// Convert video tracks
 	for (name, config) in &video.renditions {
-		let input_track = input.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 1,
-		}, moq_lite::Subscription::default())?;
+		let input_track = input.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		match &config.container {
 			Container::Legacy => {
 				// Already Legacy -- pass through
 				output_video.renditions.insert(name.clone(), config.clone());
-				let output_track = broadcast.create_track(moq_lite::Track {
-					name: name.clone(),
-					priority: 1,
-				})?;
+				let output_track = broadcast.create_track(moq_lite::Track { name: name.clone() })?;
 				let track_name = name.clone();
 				tasks.spawn(async move {
 					if let Err(e) = passthrough_track(input_track, output_track).await {
@@ -97,10 +95,7 @@ async fn run_with_catalog(
 				legacy_config.container = Container::Legacy;
 				output_video.renditions.insert(name.clone(), legacy_config);
 
-				let output_track = broadcast.create_track(moq_lite::Track {
-					name: name.clone(),
-					priority: 1,
-				})?;
+				let output_track = broadcast.create_track(moq_lite::Track { name: name.clone() })?;
 
 				let track_name = name.clone();
 				tasks.spawn(async move {
@@ -116,18 +111,15 @@ async fn run_with_catalog(
 
 	// Convert audio tracks
 	for (name, config) in &audio.renditions {
-		let input_track = input.subscribe_track(&moq_lite::Track {
-			name: name.clone(),
-			priority: 2,
-		}, moq_lite::Subscription::default())?;
+		let input_track = input.subscribe_track(
+			&moq_lite::Track { name: name.clone() },
+			moq_lite::Subscription::default(),
+		)?;
 
 		match &config.container {
 			Container::Legacy => {
 				output_audio.renditions.insert(name.clone(), config.clone());
-				let output_track = broadcast.create_track(moq_lite::Track {
-					name: name.clone(),
-					priority: 2,
-				})?;
+				let output_track = broadcast.create_track(moq_lite::Track { name: name.clone() })?;
 				let track_name = name.clone();
 				tasks.spawn(async move {
 					if let Err(e) = passthrough_track(input_track, output_track).await {
@@ -147,10 +139,7 @@ async fn run_with_catalog(
 				legacy_config.container = Container::Legacy;
 				output_audio.renditions.insert(name.clone(), legacy_config);
 
-				let output_track = broadcast.create_track(moq_lite::Track {
-					name: name.clone(),
-					priority: 2,
-				})?;
+				let output_track = broadcast.create_track(moq_lite::Track { name: name.clone() })?;
 
 				let track_name = name.clone();
 				tasks.spawn(async move {
