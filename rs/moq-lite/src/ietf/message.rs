@@ -46,6 +46,7 @@ impl<T: Message> Decode<Version> for T {
 					tracing::trace!(?result, "decoded");
 					Ok(result)
 				}
+				Err(DecodeError::Short) => Err(DecodeError::Short),
 				Err(e) => {
 					tracing::warn!(%e, ?raw, "decode failed");
 					Err(e)
@@ -60,6 +61,7 @@ impl<T: Message> Decode<Version> for T {
 					}
 					Ok(result)
 				}
+				Err(DecodeError::Short) => Err(DecodeError::Short),
 				Err(e) => {
 					tracing::warn!(%e, "decode failed");
 					Err(e)

@@ -15,6 +15,7 @@ pkg
 dist
 out
 result
+.wrangler
 *.tsbuildinfo
 node_modules
 /.direnv
