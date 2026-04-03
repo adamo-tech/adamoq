@@ -541,6 +541,47 @@ impl Request {
 		}
 	}
 
+	/// Accept the session and return a datagram handle for side-channel I/O.
+	///
+	/// The datagram handle shares the same QUIC connection as the MoQ session
+	/// but operates independently via datagrams (unreliable, unordered).
+	/// Returns `None` for transports that don't support datagrams (e.g. WebSocket).
+	#[cfg(feature = "quinn")]
+	pub async fn ok_with_datagrams(self) -> anyhow::Result<(Session, Option<DatagramHandle>)> {
+		match self.kind {
+			RequestKind::Quinn(request) => {
+				let wt = request.ok().await?;
+				let dg = DatagramHandle(wt.clone());
+				let session = self.server.accept(wt).await?;
+				Ok((session, Some(dg)))
+			}
+			#[cfg(feature = "noq")]
+			RequestKind::Noq(request) => {
+				let session = self.server.accept(request.ok().await?).await?;
+				Ok((session, None))
+			}
+			#[cfg(feature = "quiche")]
+			RequestKind::Quiche(request) => {
+				let conn = request
+					.ok()
+					.await
+					.map_err(|e| anyhow::anyhow!("failed to accept quiche WebTransport: {e}"))?;
+				let session = self.server.accept(conn).await?;
+				Ok((session, None))
+			}
+			#[cfg(feature = "iroh")]
+			RequestKind::Iroh(request) => {
+				let session = self.server.accept(request.ok().await?).await?;
+				Ok((session, None))
+			}
+			#[cfg(feature = "websocket")]
+			RequestKind::WebSocket(ws) => {
+				let session = self.server.accept(ws).await?;
+				Ok((session, None))
+			}
+		}
+	}
+
 	/// Returns the transport type as a string (e.g. "quic", "iroh").
 	pub fn transport(&self) -> &'static str {
 		match self.kind {
@@ -574,6 +615,33 @@ impl Request {
 			#[cfg(feature = "websocket")]
 			RequestKind::WebSocket(_) => None,
 		}
+	}
+}
+
+/// Handle for sending/receiving QUIC datagrams on the underlying connection.
+///
+/// Datagrams are unreliable and unordered — ideal for clock sync, congestion feedback,
+/// and other latency-sensitive side-channel data.
+#[cfg(feature = "quinn")]
+pub struct DatagramHandle(web_transport_quinn::Session);
+
+#[cfg(feature = "quinn")]
+impl DatagramHandle {
+	pub fn send(&self, data: bytes::Bytes) -> Result<(), web_transport_quinn::SessionError> {
+		self.0.send_datagram(data)
+	}
+
+	pub async fn recv(&self) -> Result<bytes::Bytes, web_transport_quinn::SessionError> {
+		self.0.read_datagram().await
+	}
+
+	pub fn clone(&self) -> Self {
+		Self(self.0.clone())
+	}
+
+	/// Get transport stats for the underlying QUIC connection.
+	pub fn stats(&self) -> web_transport_quinn::SessionStats {
+		self.0.stats()
 	}
 }
 

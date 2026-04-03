@@ -57,9 +57,9 @@ impl Connection {
 			.ok_with_datagrams()
 			.await?;
 
-		// Spawn clock sync responder if datagram transport is available
+		// Spawn datagram handler (cloq clock sync + transport stats feedback)
 		if let Some(dg) = dg_handle {
-			tokio::spawn(run_clock_responder(dg));
+			tokio::spawn(run_datagram_handler(dg));
 		}
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
@@ -72,14 +72,51 @@ impl Connection {
 	}
 }
 
-/// Responds to clock sync datagrams with relay timestamps.
+/// Handles datagrams: clock sync (cloq) + transport stats feedback.
 ///
-/// Wire format:
+/// Cloq wire format:
 ///   Request  (9 bytes): [0x01][t1:u64 BE] — client local time in µs since epoch
 ///   Response (25 bytes): [0x02][t1:u64 echo][t2:u64 relay_rx][t3:u64 relay_tx]
 ///
-/// Clients compute offset via NTP algorithm: offset = ((t2-t1) + (t3-t4)) / 2
-async fn run_clock_responder(dg: moq_native::DatagramHandle) {
+/// Transport stats feedback (relay → publisher, every 500ms):
+///   [0x03][recv_bytes:u64 BE][recv_packets:u64 BE][lost_packets:u64 BE]
+///   [rtt_us:u64 BE][cwnd:u64 BE][timestamp_us:u64 BE]
+///
+/// The publisher uses these to compute goodput, loss rate, and delay variation
+/// on the publisher→relay path (the robot's upload link).
+async fn run_datagram_handler(dg: moq_native::DatagramHandle) {
+	use web_transport_trait::Stats;
+
+	// Spawn stats feedback sender
+	let dg_stats = dg.clone();
+	let stats_task = tokio::spawn(async move {
+		let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+		loop {
+			interval.tick().await;
+
+			let stats = dg_stats.stats();
+			let rtt_us = stats.rtt()
+				.map(|r| r.as_micros() as u64)
+				.unwrap_or(0);
+
+			let mut buf = bytes::BytesMut::with_capacity(49);
+			buf.extend_from_slice(&[0x03]);
+			buf.extend_from_slice(&stats.bytes_received().unwrap_or(0).to_be_bytes());
+			buf.extend_from_slice(&stats.packets_received().unwrap_or(0).to_be_bytes());
+			buf.extend_from_slice(&stats.packets_lost().unwrap_or(0).to_be_bytes());
+			buf.extend_from_slice(&rtt_us.to_be_bytes());
+			buf.extend_from_slice(&(stats.estimated_send_rate().unwrap_or(0)).to_be_bytes());
+			buf.extend_from_slice(&now_us().to_be_bytes());
+
+			if dg_stats.send(buf.freeze()).is_err() {
+				break;
+			}
+		}
+	});
+
+	// Handle incoming datagrams (cloq requests)
 	loop {
 		let data = match dg.recv().await {
 			Ok(data) => data,
@@ -99,7 +136,8 @@ async fn run_clock_responder(dg: moq_native::DatagramHandle) {
 		}
 	}
 
-	tracing::debug!("clock sync responder ended");
+	stats_task.abort();
+	tracing::debug!("datagram handler ended");
 }
 
 fn now_us() -> u64 {
