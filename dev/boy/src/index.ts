@@ -99,7 +99,6 @@ class GameCard {
 		countdown.className = "countdown";
 		this.el.appendChild(countdown);
 
-
 		// Controls container.
 		const controls = document.createElement("div");
 		controls.className = "controls";
