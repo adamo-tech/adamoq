@@ -81,7 +81,7 @@ The demo uses an insecure HTTP fetch for local development only. In production, 
 ### More Demos
 
 - [Web Demo](/setup/demo/web) — watch and publish live streams from a browser
-- [Drone Demo](/setup/demo/drone) — simulated drone fleet with live video, sensor HUD, and remote control
+- [MoQ Boy](/setup/demo/boy) — crowd-controlled Game Boy Color streaming with live video, audio, and anarchy-mode input
 
 Check out the full [development guide](/setup/dev) for more commands, or try publishing to the public relay:
 

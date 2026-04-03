@@ -73,7 +73,7 @@ export default defineConfig({
 					text: "Demos",
 					items: [
 						{ text: "Web", link: "/setup/demo/web" },
-						{ text: "Drone", link: "/setup/demo/drone" },
+						{ text: "MoQ Boy", link: "/setup/demo/boy" },
 					],
 				},
 			],

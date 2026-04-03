@@ -6,7 +6,7 @@
 mod dev
 
 # Shortcuts to avoid `dev::` prefix.
-mod drone 'dev/drone'
+mod boy 'dev/boy'
 mod pub 'dev/pub'
 mod relay 'dev/relay'
 mod web 'dev/web'

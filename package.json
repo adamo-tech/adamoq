@@ -35,6 +35,6 @@
 		"js/publish",
 		"js/signals",
 		"dev/web",
-		"dev/drone"
+		"dev/boy"
 	]
 }
