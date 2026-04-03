@@ -87,11 +87,15 @@ impl Connection {
 async fn run_datagram_handler(dg: moq_native::DatagramHandle) {
 	use web_transport_trait::Stats;
 
-	// Spawn stats feedback sender
+	// Spawn stats feedback + keyframe request sender
 	let dg_stats = dg.clone();
 	let stats_task = tokio::spawn(async move {
 		let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
 		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+		let mut prev_lost: u64 = 0;
+		let mut prev_recv: u64 = 0;
+		let mut last_keyframe_request = std::time::Instant::now();
 
 		loop {
 			interval.tick().await;
@@ -100,18 +104,39 @@ async fn run_datagram_handler(dg: moq_native::DatagramHandle) {
 			let rtt_us = stats.rtt()
 				.map(|r| r.as_micros() as u64)
 				.unwrap_or(0);
+			let recv = stats.packets_received().unwrap_or(0);
+			let lost = stats.packets_lost().unwrap_or(0);
 
+			// Send transport stats (0x03)
 			let mut buf = bytes::BytesMut::with_capacity(49);
 			buf.extend_from_slice(&[0x03]);
 			buf.extend_from_slice(&stats.bytes_received().unwrap_or(0).to_be_bytes());
-			buf.extend_from_slice(&stats.packets_received().unwrap_or(0).to_be_bytes());
-			buf.extend_from_slice(&stats.packets_lost().unwrap_or(0).to_be_bytes());
+			buf.extend_from_slice(&recv.to_be_bytes());
+			buf.extend_from_slice(&lost.to_be_bytes());
 			buf.extend_from_slice(&rtt_us.to_be_bytes());
 			buf.extend_from_slice(&(stats.estimated_send_rate().unwrap_or(0)).to_be_bytes());
 			buf.extend_from_slice(&now_us().to_be_bytes());
 
 			if dg_stats.send(buf.freeze()).is_err() {
 				break;
+			}
+
+			// Detect loss bursts and request keyframe from publisher.
+			// If >5% of packets in this interval were lost, request IDR.
+			// Rate-limit to at most once per 2 seconds.
+			let delta_recv = recv.saturating_sub(prev_recv);
+			let delta_lost = lost.saturating_sub(prev_lost);
+			prev_recv = recv;
+			prev_lost = lost;
+
+			if delta_recv > 0 {
+				let loss_rate = delta_lost as f64 / (delta_recv + delta_lost) as f64;
+				if loss_rate > 0.05 && last_keyframe_request.elapsed() > std::time::Duration::from_secs(2) {
+					tracing::info!(loss_rate = %format!("{:.1}%", loss_rate * 100.0), "requesting keyframe from publisher (loss burst)");
+					let kf_buf = bytes::Bytes::from_static(&[0x04]);
+					let _ = dg_stats.send(kf_buf);
+					last_keyframe_request = std::time::Instant::now();
+				}
 			}
 		}
 	});

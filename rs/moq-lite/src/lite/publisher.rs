@@ -298,6 +298,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			track.start_at(start_group);
 		}
 
+		// Track active group abort handles so we can cancel stale groups
+		// when newer ones arrive (prevents cwnd starvation under loss).
+		let mut active_groups: Vec<(u64, tokio::task::AbortHandle)> = Vec::new();
+
 		loop {
 			let group = tokio::select! {
 				// Poll all active group futures; never matches but keeps them running.
@@ -317,12 +321,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
+			// Cancel groups that are more than 3 behind the new one.
+			// This frees cwnd for newer data instead of retransmitting stale groups.
+			// Threshold of 3 allows normal GOP overlap while catching truly stuck groups.
+			let mut cancelled = 0;
+			active_groups.retain(|(seq, handle)| {
+				if sequence > *seq + 3 {
+					handle.abort();
+					cancelled += 1;
+					false
+				} else {
+					true
+				}
+			});
+			if cancelled > 0 {
+				tracing::info!(sequence, cancelled, "cancelled {} stale group(s)", cancelled);
+			}
+
 			let priority = priority.insert(track.info.priority, sequence);
 			let concurrent = tasks.len();
 			if concurrent > 0 {
 				tracing::warn!(sequence, concurrent, "serving group (concurrent with {} others)", concurrent);
 			}
-			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
+			let task = tokio::spawn(Self::serve_group(session.clone(), msg, priority, group, version));
+			active_groups.push((sequence, task.abort_handle()));
+			tasks.push(async move { let _ = task.await; }.boxed());
 		}
 	}
 

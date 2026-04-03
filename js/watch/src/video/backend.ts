@@ -24,4 +24,10 @@ export interface Backend {
 export interface Stats {
 	frameCount: number;
 	bytesReceived: number;
+	/** Avg time from frame received → decoder.decode() (ms) */
+	depacketizeMs: number;
+	/** Avg time from decoder.decode() → output callback (ms) */
+	decodeMs: number;
+	/** Avg time from output callback → frame rendered (ms) */
+	renderMs: number;
 }

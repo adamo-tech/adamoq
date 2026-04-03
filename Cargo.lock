@@ -3407,6 +3407,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
+ "web-transport-trait",
 ]
 
 [[package]]

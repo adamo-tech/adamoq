@@ -20,11 +20,11 @@ impl QuinnClient {
 	pub fn new(config: &ClientConfig) -> anyhow::Result<Self> {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
-		// TODO Validate the BBR implementation before enabling it
 		let mut transport = quinn::TransportConfig::default();
 		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
 		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
+		transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 
 		let max_streams = config.max_streams.unwrap_or(crate::DEFAULT_MAX_STREAMS);
 		let max_streams = quinn::VarInt::from_u64(max_streams).unwrap_or(quinn::VarInt::MAX);

@@ -223,6 +223,51 @@ class DecoderTrack {
 		this.signals.run(this.#run.bind(this));
 	}
 
+	// Per-frame timing: maps frame timestamp → performance.now() at each stage
+	#decodeSubmitTimes = new Map<number, number>();
+	#depacketizeTimes: number[] = [];
+	#decodeTimes: number[] = [];
+	#renderTimes: number[] = [];
+	#syncWaitTimes: number[] = [];
+	#consumerWaitTimes: number[] = [];
+	#lastConsumerYield = 0;
+	#lastBenchLog = 0;
+
+	#logBenchmarks(): void {
+		const now = performance.now();
+		if (now - this.#lastBenchLog < 5000) return;
+		this.#lastBenchLog = now;
+
+		const avg = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+		const dp = avg(this.#depacketizeTimes);
+		const dc = avg(this.#decodeTimes);
+		const rn = avg(this.#renderTimes);
+		const sw = avg(this.#syncWaitTimes);
+		const cw = avg(this.#consumerWaitTimes);
+		const n = this.#depacketizeTimes.length;
+
+		if (n > 0) {
+			console.log(
+				`[bench] consumer_wait=${cw.toFixed(2)}ms depacketize=${dp.toFixed(2)}ms decode=${dc.toFixed(2)}ms sync_wait=${sw.toFixed(2)}ms render=${rn.toFixed(2)}ms total=${(cw + dp + dc + sw + rn).toFixed(2)}ms (${n} frames)`
+			);
+		}
+
+		// Update stats signal with timing info
+		this.stats.update((current) => ({
+			frameCount: current?.frameCount ?? 0,
+			bytesReceived: current?.bytesReceived ?? 0,
+			depacketizeMs: dp,
+			decodeMs: dc,
+			renderMs: rn,
+		}));
+
+		this.#depacketizeTimes = [];
+		this.#decodeTimes = [];
+		this.#renderTimes = [];
+		this.#syncWaitTimes = [];
+		this.#consumerWaitTimes = [];
+	}
+
 	#run(effect: Effect): void {
 		const sub = this.broadcast.subscribe(this.track, Catalog.PRIORITY.video);
 		effect.cleanup(() => sub.close());
@@ -230,7 +275,15 @@ class DecoderTrack {
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
-					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+					const decodeOutputTime = performance.now();
+					const ts = frame.timestamp;
+					const submitTime = this.#decodeSubmitTimes.get(ts);
+					if (submitTime !== undefined) {
+						this.#decodeTimes.push(decodeOutputTime - submitTime);
+						this.#decodeSubmitTimes.delete(ts);
+					}
+
+					const timestamp = Time.Milli.fromMicro(ts as Time.Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
 						return;
@@ -241,8 +294,10 @@ class DecoderTrack {
 						this.frame.set(frame.clone());
 					}
 
+					const syncStart = performance.now();
 					const wait = this.source.sync.wait(timestamp).then(() => true);
 					const ok = await Promise.race([wait, effect.cancel]);
+					this.#syncWaitTimes.push(performance.now() - syncStart);
 					if (!ok) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
@@ -256,10 +311,13 @@ class DecoderTrack {
 					// Trim the decode buffer as frames are rendered
 					this.#trimBuffered(timestamp);
 
+					const renderStart = performance.now();
 					this.frame.update((prev) => {
 						prev?.close();
 						return frame.clone(); // avoid closing the frame here
 					});
+					this.#renderTimes.push(performance.now() - renderStart);
+					this.#logBenchmarks();
 				} finally {
 					frame.close();
 				}
@@ -306,7 +364,9 @@ class DecoderTrack {
 
 		effect.spawn(async () => {
 			for (;;) {
+				const waitStart = performance.now();
 				const next = await Promise.race([consumer.next(), effect.cancel]);
+				const waitEnd = performance.now();
 				if (!next) break;
 
 				const { frame, group } = next;
@@ -315,11 +375,12 @@ class DecoderTrack {
 					if (previous) {
 						previous.final = true;
 					}
-					// The group is done
 					continue;
 				}
 
-				// Mark that we received this frame right now.
+				this.#consumerWaitTimes.push(waitEnd - waitStart);
+
+				const receiveTime = performance.now();
 				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
@@ -328,13 +389,14 @@ class DecoderTrack {
 					timestamp: frame.timestamp,
 				});
 
-				// Track both frame count and bytes received for stats in the UI
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.data.byteLength,
+					depacketizeMs: current?.depacketizeMs ?? 0,
+					decodeMs: current?.decodeMs ?? 0,
+					renderMs: current?.renderMs ?? 0,
 				}));
 
-				// Track decode buffer: frames sent to decoder but not yet rendered
 				if (previous?.group === group || (previous?.final && previous.group + 1 === group)) {
 					const start = Time.Milli.fromMicro(previous.timestamp);
 					const end = Time.Milli.fromMicro(frame.timestamp);
@@ -346,6 +408,9 @@ class DecoderTrack {
 					group,
 					final: false,
 				};
+
+				this.#depacketizeTimes.push(performance.now() - receiveTime);
+				this.#decodeSubmitTimes.set(frame.timestamp, performance.now());
 
 				decoder.decode(chunk);
 			}
@@ -404,6 +469,9 @@ class DecoderTrack {
 								this.stats.update((current) => ({
 									frameCount: (current?.frameCount ?? 0) + 1,
 									bytesReceived: (current?.bytesReceived ?? 0) + sample.data.byteLength,
+									depacketizeMs: current?.depacketizeMs ?? 0,
+									decodeMs: current?.decodeMs ?? 0,
+									renderMs: current?.renderMs ?? 0,
 								}));
 
 								// Track decode buffer

@@ -1,6 +1,7 @@
 export * as Signals from "@moq/signals";
 export * from "./announced.ts";
 export * from "./broadcast.ts";
+export { SyncClock } from "./cloq.ts";
 export * as Connection from "./connection/index.ts";
 export * from "./group.ts";
 export * as Path from "./path.ts";
