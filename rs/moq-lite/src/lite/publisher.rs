@@ -318,6 +318,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let priority = priority.insert(track.info.priority, sequence);
+			let concurrent = tasks.len();
+			if concurrent > 0 {
+				tracing::warn!(sequence, concurrent, "serving group (concurrent with {} others)", concurrent);
+			}
 			tasks.push(Self::serve_group(session.clone(), msg, priority, group, version).map(|_| ()));
 		}
 	}
@@ -337,9 +341,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
 
+		// Delivery timeout: abort stale groups to free congestion window for newer ones.
+		// If a group takes longer than this to deliver, reset the stream.
+		// NOTE: this is wall-clock from stream open, and frames arrive over ~1s for a
+		// 30-frame GOP. The proper fix is to reset based on newer group arrival.
+		let deadline = tokio::time::sleep(std::time::Duration::from_millis(500));
+		tokio::pin!(deadline);
+
 		loop {
 			let frame = tokio::select! {
 				biased;
+				_ = &mut deadline => {
+					tracing::warn!(sequence = %msg.sequence, "group delivery timeout, resetting stream");
+					stream.abort(&Error::Timeout);
+					return Ok(());
+				}
 				_ = stream.closed() => return Err(Error::Cancel),
 				frame = group.next_frame() => frame,
 				// Update the priority if it changes.
@@ -359,6 +375,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			loop {
 				let chunk = tokio::select! {
 					biased;
+					_ = &mut deadline => {
+						tracing::warn!(sequence = %msg.sequence, "group delivery timeout (frame), resetting stream");
+						stream.abort(&Error::Timeout);
+						return Ok(());
+					}
 					_ = stream.closed() => return Err(Error::Cancel),
 					chunk = frame.read_chunk() => chunk,
 					// Update the priority if it changes.

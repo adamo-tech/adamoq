@@ -119,11 +119,11 @@ export class Consumer {
 			}
 
 			if (consumer.sequence < this.#active) {
-				console.warn(`skipping old group: ${consumer.sequence} < ${this.#active}`);
-				// Skip old groups.
+				console.warn(`[group] skip old: seq=${consumer.sequence} active=${this.#active}`);
 				consumer.close();
 				continue;
 			}
+			console.log(`[group] accepted: seq=${consumer.sequence} active=${this.#active} buffered=${this.#groups.length}`);
 
 			const group = {
 				consumer,
@@ -227,7 +227,7 @@ export class Consumer {
 			const first = this.#groups.shift();
 			if (!first) break;
 			this.#active = this.#groups[0]?.consumer.sequence;
-			console.warn(`skipping slow group: ${first.consumer.sequence} -> ${this.#active}`);
+			console.warn(`[group] skip slow: seq=${first.consumer.sequence} -> active=${this.#active} latency=${latency}us threshold=${threshold}us buffered=${this.#groups.length} frames=${first.frames.length}`);
 
 			first.consumer.close();
 			first.frames.length = 0;
@@ -279,6 +279,8 @@ export class Consumer {
 			if (this.#notify) {
 				throw new Error("multiple calls to decode not supported");
 			}
+
+			console.log(`[group] next() waiting: active=${this.#active} groups=${this.#groups.length} seqs=[${this.#groups.map(g => `${g.consumer.sequence}(${g.frames.length}f${g.done?',done':''})`).join(',')}]`);
 
 			const wait = new Promise<void>((resolve) => {
 				this.#notify = resolve;

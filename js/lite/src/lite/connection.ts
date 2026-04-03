@@ -1,5 +1,6 @@
 import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
+import { SyncClock } from "../cloq.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
@@ -39,6 +40,9 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
+	// Relay-synced clock for RTT and offset measurement.
+	readonly clock: SyncClock | null;
+
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
@@ -60,6 +64,15 @@ export class Connection implements Established {
 		this.#publisher = new Publisher(this.#quic, this.#version);
 		this.#subscriber = new Subscriber(this.#quic, this.#version);
 
+		// Start relay-synced clock (NTP over QUIC datagrams)
+		try {
+			this.clock = new SyncClock(this.#quic);
+			console.log("[cloq] clock started");
+		} catch (e) {
+			console.warn("[cloq] failed to start clock:", e);
+			this.clock = null;
+		}
+
 		this.#run();
 	}
 
@@ -70,6 +83,7 @@ export class Connection implements Established {
 		if (this.#closed) return;
 
 		this.#closed = true;
+		this.clock?.close();
 		this.#publisher.close();
 		this.#subscriber.close();
 
@@ -217,5 +231,25 @@ export class Connection implements Established {
 	 */
 	get closed(): Promise<void> {
 		return this.#quic.closed.then(() => undefined);
+	}
+
+	/**
+	 * Get WebTransport stats including RTT.
+	 * Returns undefined if stats are not available (e.g. WebSocket fallback).
+	 */
+	async getStats(): Promise<{ rttMs: number; smoothedRttMs: number } | undefined> {
+		try {
+			// biome-ignore lint: accessing private WebTransport stats API
+			const quic = this.#quic as any;
+			if (typeof quic.getStats !== "function") return undefined;
+			const stats = await quic.getStats();
+			if (!stats || stats.smoothedRtt == null) return undefined;
+			return {
+				rttMs: stats.smoothedRtt,
+				smoothedRttMs: stats.smoothedRtt,
+			};
+		} catch {
+			return undefined;
+		}
 	}
 }
