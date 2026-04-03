@@ -1,4 +1,5 @@
 import type { Announced } from "../announced.ts";
+import { Bandwidth } from "../bandwidth.ts";
 import type { Broadcast } from "../broadcast.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
@@ -10,7 +11,9 @@ import { SessionInfo } from "./session.ts";
 import { StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
-import { type Version, versionName } from "./version.ts";
+import { Version, versionName } from "./version.ts";
+
+const SEND_BW_POLL_INTERVAL = 100; // ms
 
 /**
  * Represents a connection to a MoQ server.
@@ -42,6 +45,12 @@ export class Connection implements Established {
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
+	/** Estimated send bitrate from the congestion controller. */
+	readonly sendBandwidth?: Bandwidth;
+
+	/** Estimated receive bitrate from PROBE (moq-lite-03+ only). */
+	readonly recvBandwidth?: Bandwidth;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -57,8 +66,14 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 
+		// Set up bandwidth estimation for Lite03+.
+		if (version === Version.DRAFT_03) {
+			this.sendBandwidth = new Bandwidth();
+			this.recvBandwidth = new Bandwidth();
+		}
+
 		this.#publisher = new Publisher(this.#quic, this.#version);
-		this.#subscriber = new Subscriber(this.#quic, this.#version);
+		this.#subscriber = new Subscriber(this.#quic, this.#version, this.recvBandwidth);
 
 		this.#run();
 	}
@@ -85,6 +100,11 @@ export class Connection implements Established {
 		const session = this.#runSession();
 		const bidis = this.#runBidis();
 		const unis = this.#runUnis();
+
+		// Start polling send bandwidth if supported.
+		if (this.sendBandwidth) {
+			this.#runSendBandwidth(this.sendBandwidth);
+		}
 
 		try {
 			await Promise.all([session, bidis, unis]);
@@ -209,6 +229,37 @@ export class Connection implements Established {
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}
+	}
+
+	/**
+	 * Polls the QUIC congestion controller for estimated send rate.
+	 */
+	#runSendBandwidth(bandwidth: Bandwidth) {
+		// getStats is not yet in the TypeScript WebTransport type definitions.
+		const quic = this.#quic as unknown as {
+			getStats?: () => Promise<{ estimatedSendRate: number | null }>;
+		};
+
+		const getStats = quic.getStats?.bind(quic);
+		if (!getStats) return;
+
+		const run = async () => {
+			try {
+				while (!this.#closed) {
+					const timeout = new Promise<void>((resolve) => setTimeout(resolve, SEND_BW_POLL_INTERVAL));
+					await timeout;
+
+					if (this.#closed) break;
+
+					const stats = await getStats();
+					bandwidth.set(stats.estimatedSendRate ?? undefined);
+				}
+			} catch {
+				// Connection closed.
+			}
+		};
+
+		void run();
 	}
 
 	/**

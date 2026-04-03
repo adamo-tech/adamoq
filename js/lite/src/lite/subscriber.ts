@@ -1,4 +1,5 @@
 import { Announced } from "../announced.ts";
+import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
@@ -7,6 +8,7 @@ import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
+import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -26,15 +28,25 @@ export class Subscriber {
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
 
+	// Recv bandwidth producer (Lite03+ only).
+	#recvBandwidth?: Bandwidth;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
+	 * @param version - The protocol version
+	 * @param recvBandwidth - Optional bandwidth producer for PROBE (Lite03+ only)
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version) {
+	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth) {
 		this.#quic = quic;
 		this.version = version;
+		this.#recvBandwidth = recvBandwidth;
+
+		if (recvBandwidth && version === Version.DRAFT_03) {
+			this.#runProbe();
+		}
 	}
 
 	/**
@@ -193,6 +205,38 @@ export class Subscriber {
 			producer.close(e);
 			stream.stop(e);
 		}
+	}
+
+	/**
+	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
+	 * Retries on error.
+	 */
+	#runProbe() {
+		const run = async () => {
+			for (;;) {
+				try {
+					const stream = await Stream.open(this.#quic);
+					await stream.writer.u53(StreamId.Probe);
+
+					for (;;) {
+						const probe = await Probe.decodeMaybe(stream.reader, this.version);
+						if (!probe) break;
+						this.#recvBandwidth?.set(probe.bitrate);
+					}
+				} catch (err: unknown) {
+					const e = error(err);
+					console.debug(`probe recv error: ${e.message}`);
+				}
+
+				// Clear the bitrate on disconnect.
+				this.#recvBandwidth?.set(undefined);
+
+				// Wait before retrying.
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+			}
+		};
+
+		void run();
 	}
 
 	close() {

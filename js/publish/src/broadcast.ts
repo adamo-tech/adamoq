@@ -35,6 +35,9 @@ export class Broadcast {
 	preview: Preview;
 	user: User.Info;
 
+	// Derived signal tracking the connection's send bandwidth estimate.
+	#sendBandwidth = new Signal<number | undefined>(undefined);
+
 	signals = new Effect();
 
 	constructor(props?: BroadcastProps) {
@@ -43,13 +46,25 @@ export class Broadcast {
 		this.name = Signal.from(props?.name ?? Moq.Path.empty());
 
 		this.audio = new Audio.Encoder(props?.audio);
-		this.video = new Video.Root(props?.video);
+		this.video = new Video.Root({ ...props?.video, sendBandwidth: this.#sendBandwidth });
 		this.location = new Location.Root(props?.location);
 		this.chat = new Chat.Root(props?.chat);
 		this.preview = new Preview(props?.preview);
 		this.user = new User.Info(props?.user);
 
 		this.signals.run(this.#run.bind(this));
+		this.signals.run(this.#runSendBandwidth.bind(this));
+	}
+
+	#runSendBandwidth(effect: Effect) {
+		const connection = effect.get(this.connection);
+		if (!connection?.sendBandwidth) {
+			effect.set(this.#sendBandwidth, undefined);
+			return;
+		}
+
+		const estimate = effect.get(connection.sendBandwidth.signal);
+		effect.set(this.#sendBandwidth, estimate);
 	}
 
 	#run(effect: Effect) {

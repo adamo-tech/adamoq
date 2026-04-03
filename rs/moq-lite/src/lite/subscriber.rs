@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
-	PathOwned, TrackProducer,
+	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
+	OriginProducer, Path, PathOwned, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -20,16 +20,23 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	recv_bandwidth: Option<BandwidthProducer>,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginProducer>,
+		recv_bandwidth: Option<BandwidthProducer>,
+		version: Version,
+	) -> Self {
 		Self {
 			session,
 			origin,
+			recv_bandwidth,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
@@ -37,9 +44,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
+		let bw = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
+			_ = bw.run_recv_bandwidth() => Ok(()),
 		}
 	}
 
@@ -118,6 +127,59 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Close the stream when there's nothing more to announce.
 		stream.writer.finish()?;
 		stream.writer.closed().await
+	}
+
+	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
+	async fn run_recv_bandwidth(self) {
+		let Some(bandwidth) = &self.recv_bandwidth else {
+			return;
+		};
+
+		loop {
+			// Wait until someone cares about recv bandwidth.
+			if bandwidth.used().await.is_err() {
+				return;
+			}
+
+			// Open a PROBE bidi stream.
+			let res = self.run_probe_stream(bandwidth).await;
+
+			match res {
+				Err(Error::Cancel | Error::Transport) => {
+					tracing::debug!("probe recv stream closed");
+				}
+				Err(err) => {
+					tracing::warn!(%err, "probe recv stream error");
+				}
+				Ok(()) => {}
+			}
+
+			// Clear the bitrate on disconnect.
+			let _ = bandwidth.set(None);
+		}
+	}
+
+	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {
+		let mut stream = Stream::open(&self.session, self.version).await?;
+		stream.writer.encode(&lite::ControlType::Probe).await?;
+
+		loop {
+			tokio::select! {
+				biased;
+				res = bandwidth.unused() => {
+					if res.is_err() {
+						return Ok(());
+					}
+					// No more consumers, close the probe stream.
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
+				probe = stream.reader.decode::<lite::Probe>() => {
+					let probe = probe?;
+					let _ = bandwidth.set(Some(probe.bitrate));
+				}
+			}
+		}
 	}
 
 	fn start_announce(

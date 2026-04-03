@@ -10,6 +10,10 @@ export interface EncoderProps {
 	enabled?: boolean | Signal<boolean>;
 	config?: EncoderConfig | Signal<EncoderConfig | undefined>;
 	container?: Catalog.Container;
+
+	// Optional: estimated send bandwidth in bps. When set and no explicit maxBitrate
+	// is configured, the encoder will cap its bitrate to this value.
+	sendBandwidth?: Getter<number | undefined>;
 }
 
 // TODO support signals?
@@ -57,11 +61,15 @@ export class Encoder {
 	// True when the encoder is actively serving a track.
 	active = new Signal<boolean>(false);
 
+	// Optional: estimated send bandwidth for adaptive bitrate capping.
+	sendBandwidth: Getter<number | undefined>;
+
 	constructor(frame: Getter<VideoFrame | undefined>, source: Signal<Source | undefined>, props?: EncoderProps) {
 		this.frame = frame;
 		this.source = source;
 		this.enabled = Signal.from(props?.enabled ?? false);
 		this.config = Signal.from(props?.config);
+		this.sendBandwidth = props?.sendBandwidth ?? new Signal<number | undefined>(undefined);
 
 		this.#signals.run(this.#runCatalog.bind(this));
 		this.#signals.run(this.#runConfig.bind(this));
@@ -202,6 +210,18 @@ export class Encoder {
 			}
 
 			bitrate = Math.round(Math.min(bitrate, user.maxBitrate || bitrate));
+
+			// If no explicit maxBitrate, cap to the estimated send bandwidth (with 90% safety margin).
+			if (!user.maxBitrate) {
+				const sendBw = effect.get(this.sendBandwidth);
+				if (sendBw != null) {
+					// Reserve ~10% for audio and protocol overhead.
+					const cap = Math.round(sendBw * 0.9);
+					// Don't go below 100kbps to keep encoding usable.
+					const MIN_BITRATE = 100_000;
+					bitrate = Math.max(MIN_BITRATE, Math.min(bitrate, cap));
+				}
+			}
 
 			const config: VideoEncoderConfig = {
 				codec,

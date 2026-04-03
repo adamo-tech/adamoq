@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::{Error, Version};
+use crate::{BandwidthConsumer, Error, Version};
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -11,14 +11,23 @@ use crate::{Error, Version};
 pub struct Session {
 	session: Arc<dyn SessionInner>,
 	version: Version,
+	send_bandwidth: Option<BandwidthConsumer>,
+	recv_bandwidth: Option<BandwidthConsumer>,
 	closed: bool,
 }
 
 impl Session {
-	pub(super) fn new<S: web_transport_trait::Session>(session: S, version: Version) -> Self {
+	pub(super) fn new<S: web_transport_trait::Session>(
+		session: S,
+		version: Version,
+		send_bandwidth: Option<BandwidthConsumer>,
+		recv_bandwidth: Option<BandwidthConsumer>,
+	) -> Self {
 		Self {
 			session: Arc::new(session),
 			version,
+			send_bandwidth,
+			recv_bandwidth,
 			closed: false,
 		}
 	}
@@ -26,6 +35,20 @@ impl Session {
 	/// Returns the negotiated protocol version.
 	pub fn version(&self) -> Version {
 		self.version
+	}
+
+	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
+	///
+	/// Returns `None` if the QUIC backend or MoQ version doesn't support bandwidth estimation.
+	pub fn send_bandwidth(&self) -> Option<BandwidthConsumer> {
+		self.send_bandwidth.clone()
+	}
+
+	/// Returns a consumer for the estimated receive bitrate (from PROBE).
+	///
+	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
+	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
+		self.recv_bandwidth.clone()
 	}
 
 	/// Close the underlying transport session.

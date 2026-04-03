@@ -212,9 +212,25 @@ export class Source {
 
 		const target = effect.get(this.target);
 
+		// If no explicit bitrate target, use the recv bandwidth estimate from the connection.
+		let effectiveTarget = target;
+		if (!target?.bitrate && !target?.name) {
+			const broadcast = effect.get(this.broadcast);
+			const connection = broadcast ? effect.get(broadcast.connection) : undefined;
+			const recvBw = connection?.recvBandwidth;
+			if (recvBw) {
+				const estimate = effect.get(recvBw.signal);
+				if (estimate != null) {
+					// Apply a safety margin (80%) to avoid oscillation.
+					const safeBitrate = Math.round(estimate * 0.8);
+					effectiveTarget = { ...target, bitrate: safeBitrate };
+				}
+			}
+		}
+
 		// Manual selection by name
-		const manual = target?.name;
-		const selected = manual && manual in available ? manual : this.#select(available, target);
+		const manual = effectiveTarget?.name;
+		const selected = manual && manual in available ? manual : this.#select(available, effectiveTarget);
 		if (!selected) return;
 
 		const config = available[selected];
