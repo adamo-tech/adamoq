@@ -1,32 +1,10 @@
-//! MoQ relay server connecting publishers to subscribers.
-//!
-//! Content-agnostic relay that works with any live data, not just media.
-//!
-//! Features:
-//! - Clustering: connect multiple relays for global distribution
-//! - Authentication: JWT-based access control via [`moq_token`]
-//! - WebSocket fallback: for restrictive networks
-//! - HTTP API: health checks and metrics via [`Web`]
-
-mod auth;
-mod cluster;
-mod config;
-mod connection;
-mod web;
-#[cfg(feature = "websocket")]
-mod websocket;
-
-/// The relay needs higher stream limits than the library default
-/// to handle many concurrent subscriptions across connections.
-const DEFAULT_MAX_STREAMS: u64 = 10_000;
-
-pub use auth::*;
-pub use cluster::*;
-pub use config::*;
-pub use connection::*;
-pub use web::*;
+use moq_relay::*;
 
 use anyhow::Context;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -72,12 +50,18 @@ async fn main() -> anyhow::Result<()> {
 
 	#[cfg(unix)]
 	// Notify systemd that we're ready after all initialization is complete
-	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+
+	#[cfg(feature = "jemalloc")]
+	let jemalloc = jemalloc::run();
+	#[cfg(not(feature = "jemalloc"))]
+	let jemalloc = std::future::pending::<anyhow::Result<()>>();
 
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
 		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
+		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
 		else => Ok(()),
 	}
 }

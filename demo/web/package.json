@@ -1,0 +1,32 @@
+{
+	"name": "@moq/demo",
+	"private": true,
+	"type": "module",
+	"version": "0.1.1",
+	"description": "Media over QUIC - Demo",
+	"license": "(MIT OR Apache-2.0)",
+	"repository": "github:moq-dev/moq",
+	"scripts": {
+		"dev": "vite --open",
+		"build": "vite build",
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@moq/hang": "workspace:^",
+		"@moq/watch": "workspace:^",
+		"@moq/publish": "workspace:^"
+	},
+	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
+	"devDependencies": {
+		"@tailwindcss/typography": "^0.5.16",
+		"@tailwindcss/vite": "^4.1.13",
+		"esbuild": "^0.27.0",
+		"highlight.js": "^11.11.1",
+		"solid-element": "^1.9.1",
+		"solid-js": "^1.9.10",
+		"tailwindcss": "^4.1.13",
+		"typescript": "^6.0.0",
+		"vite": "^7.3.1",
+		"vite-plugin-solid": "^2.11.10"
+	}
+}

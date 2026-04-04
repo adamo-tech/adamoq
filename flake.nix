@@ -1,6 +1,12 @@
 {
   description = "MoQ - Media over QUIC";
 
+  # For pre-built binaries (faster builds), add our Cachix cache to your Nix config:
+  #   extra-substituters = https://kixelated.cachix.org
+  #   extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+  #
+  # Or run: cachix use kixelated
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
@@ -60,9 +66,12 @@
           cargo-sort
           cargo-shear
           cargo-edit
-          cargo-hack
           cargo-sweep
           cargo-semver-checks
+        ]
+        ++ pkgs.lib.optionals (!pkgs.stdenv.isDarwin) [
+          # Marked broken on Darwin in nixpkgs, but builds fine on Linux.
+          pkgs.release-plz
         ];
 
         # JavaScript dependencies
@@ -104,11 +113,16 @@
             moq-clock
             moq-cli
             moq-token-cli
+            moq-boy
             ;
         };
 
         devShells.default = pkgs.mkShell {
           packages = rustDeps ++ jsDeps ++ pyDeps ++ cdnDeps;
+
+          # jemalloc's configure uses -O0 test builds, which conflict with
+          # Nix's _FORTIFY_SOURCE hardening (requires -O).
+          hardeningDisable = [ "fortify" ];
 
           shellHook = ''
             export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"

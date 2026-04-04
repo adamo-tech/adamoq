@@ -334,7 +334,6 @@ async function connectWebTransport(
 	const finalOptions: WebTransportOptions = {
 		allowPooling: false,
 		congestionControl: "low-latency",
-		// @ts-expect-error - TODO: add protocols to WebTransportOptions
 		protocols: [Lite.ALPN_03, Lite.ALPN, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_15],
 		...options,
 	};
@@ -367,6 +366,9 @@ async function connectWebTransport(
 	}
 
 	const quic = new WebTransport(finalUrl, finalOptions);
+
+	// Both .ready and .closed reject on failure; catch .closed to avoid an unhandled rejection.
+	quic.closed.catch(() => {});
 
 	// Wait for the WebTransport to connect, or for the cancel promise to resolve.
 	// Close the connection if we lost the race.

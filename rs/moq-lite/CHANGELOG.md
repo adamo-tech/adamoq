@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.6...moq-lite-v0.15.7) - 2026-04-03
+
+### Other
+
+- Auto-pause emulation when no viewers are watching ([#1201](https://github.com/moq-dev/moq/pull/1201))
+
+## [0.15.6](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.5...moq-lite-v0.15.6) - 2026-04-03
+
+### Fixed
+
+- *(@moq/lite)* encode empty namespace as [] not [""] ([#1179](https://github.com/moq-dev/moq/pull/1179))
+
+### Other
+
+- Improve SETUP message handling and error reporting in session ([#1189](https://github.com/moq-dev/moq/pull/1189))
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+
+## [0.15.5](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.4...moq-lite-v0.15.5) - 2026-03-25
+
+### Other
+
+- Add generic ordered::Consumer/Producer to moq-mux ([#1155](https://github.com/moq-dev/moq/pull/1155))
+- Make SUBSCRIBE_NAMESPACE errors non-fatal ([#1154](https://github.com/moq-dev/moq/pull/1154))
+- Add with_origin convenience method to Client and Server ([#1153](https://github.com/moq-dev/moq/pull/1153))
+- Add systematic tracing for control message encode/decode ([#1144](https://github.com/moq-dev/moq/pull/1144))
+- Distinguish Parameters from Properties per moq-transport-17 ([#1136](https://github.com/moq-dev/moq/pull/1136))
+- Revert next_group to recv_group rename ([#1137](https://github.com/moq-dev/moq/pull/1137))
+- Rename next_group to recv_group for clarity ([#1135](https://github.com/moq-dev/moq/pull/1135))
+
 ## [0.15.4](https://github.com/moq-dev/moq/compare/moq-lite-v0.15.3...moq-lite-v0.15.4) - 2026-03-18
 
 ### Other

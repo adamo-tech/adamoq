@@ -1,19 +1,26 @@
 use anyhow::Context;
 use axum::http;
+use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions, MokaManager};
 use moq_lite::{AsPath, Path, PathOwned};
-use moq_token::KeySet;
+use moq_token::{Key, KeyId};
+use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::Arc;
 
+/// Parameters extracted from an incoming connection URL for authentication.
 #[derive(Default, Debug)]
 pub struct AuthParams {
+	/// The URL path identifying the broadcast root.
 	pub path: String,
+	/// A JWT token, if provided via the `jwt` query parameter.
 	pub jwt: Option<String>,
+	/// A cluster registration identifier, if provided via the `register` query parameter.
 	pub register: Option<String>,
 }
 
 impl AuthParams {
+	/// Creates params with just a path and no token or registration.
 	pub fn new(path: impl Into<String>) -> Self {
 		Self {
 			path: path.into(),
@@ -21,6 +28,7 @@ impl AuthParams {
 		}
 	}
 
+	/// Extracts authentication parameters from a URL's path and query string.
 	pub fn from_url(url: &url::Url) -> Self {
 		let path = url.path().to_string();
 		let mut jwt = None;
@@ -41,7 +49,9 @@ impl AuthParams {
 	}
 }
 
+/// Errors returned when authentication or authorization fails.
 #[derive(thiserror::Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum AuthError {
 	#[error("authentication is disabled")]
 	UnexpectedToken,
@@ -57,6 +67,15 @@ pub enum AuthError {
 
 	#[error("a cluster token was expected")]
 	ExpectedCluster,
+
+	#[error("key not found")]
+	KeyNotFound,
+
+	#[error("missing key ID in token")]
+	MissingKeyId,
+
+	#[error(transparent)]
+	InvalidKeyId(#[from] moq_token::KeyIdError),
 }
 
 impl From<AuthError> for http::StatusCode {
@@ -71,19 +90,22 @@ impl axum::response::IntoResponse for AuthError {
 	}
 }
 
+/// Configuration for JWT-based authentication.
 #[derive(clap::Args, Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct AuthConfig {
-	/// Either the root authentication key or a URI to a JWK set.
-	/// If present, all paths will require a token unless they are in the public list.
+	/// A single JWK key file for authentication.
+	/// No `kid` header is required in JWTs.
 	#[arg(long = "auth-key", env = "MOQ_AUTH_KEY")]
 	pub key: Option<String>,
 
-	/// How often to refresh the JWK set (in seconds), will be ignored if the `key` is not a valid URI.
-	/// If not provided, there won't be any refreshing, the JWK set will only be loaded once at startup.
-	/// Minimum value: 30, defaults to None
-	#[arg(long = "auth-refresh-interval", env = "MOQ_AUTH_REFRESH_INTERVAL")]
-	pub refresh_interval: Option<u64>,
+	/// A directory path or base URL containing JWK files named by key ID.
+	///
+	/// File path: reads `{dir}/{kid}.jwk` from disk.
+	/// URL: fetches `{url}/{kid}.jwk` with HTTP caching.
+	#[arg(long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR")]
+	pub key_dir: Option<String>,
 
 	/// The prefix that will be public for reading and writing.
 	/// If present, unauthorized users will be able to read and write to this prefix ONLY.
@@ -93,164 +115,294 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
+	/// Initializes an [`Auth`] instance from this configuration.
 	pub async fn init(self) -> anyhow::Result<Auth> {
 		Auth::new(self).await
 	}
 }
 
+/// The result of a successful authentication, containing the resolved
+/// permissions for a connection.
 #[derive(Debug)]
 pub struct AuthToken {
+	/// The root path this token is scoped to.
 	pub root: PathOwned,
+	/// Paths the holder is allowed to subscribe to, relative to `root`.
 	pub subscribe: Vec<PathOwned>,
+	/// Paths the holder is allowed to publish to, relative to `root`.
 	pub publish: Vec<PathOwned>,
+	/// Whether this token grants cluster-level privileges.
 	pub cluster: bool,
+	/// The cluster node name to register, if this is a cluster connection.
 	pub register: Option<String>,
 }
 
-const REFRESH_ERROR_INTERVAL: Duration = Duration::from_secs(300);
-
-#[derive(Clone)]
-pub struct Auth {
-	key: Option<Arc<Mutex<KeySet>>>,
-	public: Option<PathOwned>,
-	refresh_task: Option<Arc<tokio::task::JoinHandle<()>>>,
+enum KeySource {
+	/// A single key file. No kid required.
+	File(PathBuf),
+	/// A directory of key files, resolved by kid as `{dir}/{kid}.jwk`.
+	Dir(PathBuf),
+	/// A single key URL. No kid required.
+	Url {
+		url: url::Url,
+		client: ClientWithMiddleware,
+	},
+	/// A base URL for kid-based key lookup, fetching `{base}/{kid}.jwk`.
+	UrlDir {
+		base: url::Url,
+		client: ClientWithMiddleware,
+	},
 }
 
-impl Drop for Auth {
-	fn drop(&mut self) {
-		if let Some(handle) = self.refresh_task.as_ref()
-			&& Arc::strong_count(handle) == 1
-		{
-			handle.abort();
+struct KeyResolver {
+	source: KeySource,
+}
+
+impl KeyResolver {
+	fn new(source: KeySource) -> Self {
+		Self { source }
+	}
+
+	/// Try to load the default key (only works for single-key sources: File/Url).
+	/// Returns Err for directory sources that require a kid.
+	async fn resolve_default(&self) -> Result<Arc<Key>, AuthError> {
+		match &self.source {
+			KeySource::File(_) | KeySource::Url { .. } => self.resolve(None).await,
+			KeySource::Dir(_) | KeySource::UrlDir { .. } => Err(AuthError::MissingKeyId),
 		}
+	}
+
+	async fn resolve(&self, kid: Option<&str>) -> Result<Arc<Key>, AuthError> {
+		match &self.source {
+			KeySource::File(path) => {
+				let key = Key::from_file_async(path).await.map_err(|_| AuthError::KeyNotFound)?;
+				Ok(Arc::new(key))
+			}
+			KeySource::Dir(dir) => {
+				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				let kid = KeyId::decode(kid)?;
+				let path = dir.join(format!("{kid}.jwk"));
+				let key = Key::from_file_async(&path).await.map_err(|_| AuthError::KeyNotFound)?;
+				Ok(Arc::new(key))
+			}
+			KeySource::Url { url, client } => Self::fetch_key(client, url.clone()).await,
+			KeySource::UrlDir { base, client } => {
+				let kid = kid.ok_or(AuthError::MissingKeyId)?;
+				let kid = KeyId::decode(kid)?;
+				let url = base.join(&format!("{kid}.jwk")).map_err(|_| AuthError::KeyNotFound)?;
+				Self::fetch_key(client, url).await
+			}
+		}
+	}
+
+	async fn fetch_key(client: &ClientWithMiddleware, url: url::Url) -> Result<Arc<Key>, AuthError> {
+		let response = client.get(url.clone()).send().await.map_err(|e| {
+			tracing::warn!(%url, %e, "failed to fetch key");
+			AuthError::KeyNotFound
+		})?;
+
+		let response = response.error_for_status().map_err(|e| {
+			tracing::warn!(%url, %e, "key endpoint returned error");
+			AuthError::KeyNotFound
+		})?;
+
+		let body = response.text().await.map_err(|e| {
+			tracing::warn!(%url, %e, "failed to read key response body");
+			AuthError::KeyNotFound
+		})?;
+
+		let key = Key::from_str(&body).map_err(|e| {
+			tracing::warn!(%url, %e, "failed to parse key");
+			AuthError::DecodeFailed
+		})?;
+
+		Ok(Arc::new(key))
+	}
+}
+
+/// Verifies JWT tokens and resolves connection permissions.
+///
+/// Clone this freely — the underlying state is shared via [`Arc`].
+#[derive(Clone)]
+pub struct Auth {
+	resolver: Option<Arc<KeyResolver>>,
+	public: Option<PathOwned>,
+}
+
+fn build_http_client() -> anyhow::Result<ClientWithMiddleware> {
+	let client = reqwest::Client::builder()
+		.timeout(std::time::Duration::from_secs(10))
+		.build()
+		.context("failed to build HTTP client")?;
+
+	Ok(reqwest_middleware::ClientBuilder::new(client)
+		.with(Cache(HttpCache {
+			mode: CacheMode::Default,
+			manager: MokaManager::default(),
+			options: HttpCacheOptions::default(),
+		}))
+		.build())
+}
+
+fn parse_url(s: &str) -> Option<url::Url> {
+	let url = url::Url::parse(s).ok()?;
+	match url.scheme() {
+		"http" | "https" => Some(url),
+		_ => None,
 	}
 }
 
 impl Auth {
-	fn compare_key_sets(previous: &KeySet, new: &KeySet) {
-		for new_key in new.keys.iter() {
-			if new_key.kid.is_some() && !previous.keys.iter().any(|k| k.kid == new_key.kid) {
-				tracing::info!("found new JWK \"{}\"", new_key.kid.as_deref().unwrap())
-			}
+	/// Creates a new authenticator from the given configuration.
+	///
+	/// Collect guest access paths from a key, removing duplicates and subsets.
+	/// For example, a key with paths ["foo", "foo/bar", "baz"] yields ["foo", "baz"]
+	/// since "foo/bar" is a subset of "foo".
+	fn aggregate_guest_paths(key: &Key, public: Option<&PathOwned>) -> (Vec<PathOwned>, Vec<PathOwned>) {
+		let mut guest_sub: Vec<PathOwned> = Vec::new();
+		let mut guest_pub: Vec<PathOwned> = Vec::new();
+
+		// Backwards compatibility: --auth-public sets both guest_sub and guest_pub
+		if let Some(public) = public {
+			guest_sub.push(public.to_owned());
+			guest_pub.push(public.to_owned());
 		}
-		for old_key in previous.keys.iter() {
-			if old_key.kid.is_some() && !new.keys.iter().any(|k| k.kid == old_key.kid) {
-				tracing::info!("removed JWK \"{}\"", old_key.kid.as_deref().unwrap())
-			}
+
+		for sub in key.guest_sub.iter().chain(key.guest.iter()) {
+			guest_sub.push(Path::new(sub).to_owned());
 		}
+		for pub_ in key.guest_pub.iter().chain(key.guest.iter()) {
+			guest_pub.push(Path::new(pub_).to_owned());
+		}
+
+		let guest_sub = Self::dedup_paths(guest_sub);
+		let guest_pub = Self::dedup_paths(guest_pub);
+
+		if guest_sub.len() > 1 {
+			tracing::debug!("key has multiple guest_sub paths: {:?}", guest_sub);
+		}
+		if guest_pub.len() > 1 {
+			tracing::debug!("key has multiple guest_pub paths: {:?}", guest_pub);
+		}
+
+		(guest_sub, guest_pub)
 	}
 
-	async fn refresh_key_set(jwks_uri: &str, key_set: &Mutex<KeySet>) -> anyhow::Result<()> {
-		let new_keys = moq_token::load_keys(jwks_uri).await?;
+	/// Remove duplicate and subset paths, keeping only the shortest prefixes.
+	fn dedup_paths(mut paths: Vec<PathOwned>) -> Vec<PathOwned> {
+		if paths.len() <= 1 {
+			return paths;
+		}
 
-		let mut key_set = key_set.lock().expect("keyset mutex poisoned");
-		Self::compare_key_sets(&key_set, &new_keys);
-		*key_set = new_keys;
+		// Sort by length so shorter (more permissive) prefixes come first
+		paths.sort_by_key(|p| p.len());
+		paths.dedup();
 
-		Ok(())
-	}
-
-	async fn refresh_task(interval: Duration, key_set: Arc<Mutex<KeySet>>, jwks_uri: String) {
-		loop {
-			tokio::time::sleep(interval).await;
-
-			if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
-				if interval > REFRESH_ERROR_INTERVAL * 2 {
-					tracing::error!(
-						"failed to load JWKS, will retry in {} seconds: {:?}",
-						REFRESH_ERROR_INTERVAL.as_secs(),
-						e
-					);
-					tokio::time::sleep(REFRESH_ERROR_INTERVAL).await;
-
-					if let Err(e) = Self::refresh_key_set(&jwks_uri, key_set.as_ref()).await {
-						tracing::error!("failed to load JWKS again, giving up this time: {:?}", e);
-					} else {
-						tracing::info!("successfully loaded JWKS on the second try");
-					}
-				} else {
-					// Don't retry because the next refresh is going to happen very soon
-					tracing::error!("failed to refresh JWKS: {:?}", e);
+		let mut result: Vec<PathOwned> = Vec::new();
+		'outer: for path in paths {
+			for existing in &result {
+				if path.has_prefix(existing) {
+					continue 'outer;
 				}
 			}
+			result.push(path);
 		}
+		result
 	}
 
 	pub async fn new(config: AuthConfig) -> anyhow::Result<Self> {
-		let public = config.public.map(|p| p.as_path().to_owned());
+		let public = config.public.as_ref().map(|p| {
+			tracing::warn!("--auth-public is deprecated; use --guest when generating an auth key instead");
+			p.as_path().to_owned()
+		});
 
-		if let Some(key) = config.key {
-			if key.starts_with("http://") || key.starts_with("https://") {
-				Self::new_remote(key, public, config.refresh_interval).await
+		anyhow::ensure!(
+			config.key.is_none() || config.key_dir.is_none(),
+			"cannot specify both --auth-key and --auth-key-dir"
+		);
+
+		let source = if let Some(key) = config.key {
+			let source = if let Some(url) = parse_url(&key) {
+				KeySource::Url {
+					url,
+					client: build_http_client()?,
+				}
 			} else {
-				Self::new_local(key, public)
-			}
-		} else if public.is_some() {
-			Ok(Self {
-				key: None,
-				public,
-				refresh_task: None,
-			})
-		} else {
-			anyhow::bail!("no root key or public path configured");
-		}
-	}
-
-	async fn new_remote(uri: String, public: Option<PathOwned>, refresh_interval: Option<u64>) -> anyhow::Result<Self> {
-		// Start with an empty KeySet
-		let key_set = Arc::new(Mutex::new(KeySet::default()));
-
-		tracing::info!(%uri, "loading JWK set");
-
-		Self::refresh_key_set(&uri, key_set.as_ref()).await?;
-
-		let refresh_task = if let Some(refresh_interval_secs) = refresh_interval {
-			anyhow::ensure!(refresh_interval_secs >= 30, "refresh_interval cannot be less than 30");
-
-			Some(Arc::new(tokio::spawn(Self::refresh_task(
-				Duration::from_secs(refresh_interval_secs),
-				key_set.clone(),
-				uri,
-			))))
+				let path = PathBuf::from(&key);
+				anyhow::ensure!(path.is_file(), "auth-key path is not a file: {key}");
+				KeySource::File(path)
+			};
+			Some(source)
+		} else if let Some(key_dir) = config.key_dir {
+			let source = if let Some(mut url) = parse_url(&key_dir) {
+				// Ensure trailing slash so Url::join appends rather than replaces the last segment
+				if !url.path().ends_with('/') {
+					url.set_path(&format!("{}/", url.path()));
+				}
+				KeySource::UrlDir {
+					base: url,
+					client: build_http_client()?,
+				}
+			} else {
+				let path = PathBuf::from(&key_dir);
+				anyhow::ensure!(path.is_dir(), "auth-key-dir path is not a directory: {key_dir}");
+				KeySource::Dir(path)
+			};
+			Some(source)
 		} else {
 			None
 		};
 
-		Ok(Self {
-			key: Some(key_set),
-			public,
-			refresh_task,
-		})
+		let resolver = source.map(|s| Arc::new(KeyResolver::new(s)));
+
+		if resolver.is_none() && public.is_none() {
+			anyhow::bail!("no auth-key, auth-key-dir, or public path configured");
+		}
+
+		Ok(Self { resolver, public })
 	}
 
-	fn new_local(key: String, public: Option<PathOwned>) -> anyhow::Result<Self> {
-		let key = moq_token::Key::from_file(&key).context("cannot load key")?;
-		let key_set = Arc::new(Mutex::new(KeySet {
-			keys: vec![Arc::new(key)],
-		}));
+	/// Parse the token from the user provided URL, returning the claims if successful.
+	/// If no token is provided, then the claims will use the public path if it is set.
+	pub async fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
+		let claims = if let Some(token) = params.jwt.as_deref() {
+			let Some(resolver) = &self.resolver else {
+				return Err(AuthError::UnexpectedToken);
+			};
 
-		Ok(Self {
-			key: Some(key_set),
-			public,
-			refresh_task: None,
-		})
-	}
+			// Extract kid from JWT header (may be None for single-key modes)
+			let header = jsonwebtoken::decode_header(token).map_err(|_| AuthError::DecodeFailed)?;
 
-	// Parse the token from the user provided URL, returning the claims if successful.
-	// If no token is provided, then the claims will use the public path if it is set.
-	pub fn verify(&self, params: &AuthParams) -> Result<AuthToken, AuthError> {
-		// Find the token in the query parameters.
-		// ?jwt=...
-		let claims = if let Some(token) = params.jwt.as_deref()
-			&& let Some(key) = self.key.as_deref()
-		{
-			key.lock()
-				.expect("key mutex poisoned")
-				.decode(token)
-				.map_err(|_| AuthError::DecodeFailed)?
-		} else if params.jwt.is_some() {
-			return Err(AuthError::UnexpectedToken);
+			// Resolve the key (kid requirement depends on the source type)
+			let key = resolver.resolve(header.kid.as_deref()).await?;
+
+			// Verify the token with the resolved key
+			key.decode(token).map_err(|_| AuthError::DecodeFailed)?
+		} else if let Some(resolver) = &self.resolver {
+			// No JWT provided -- check if the key has guest access configured.
+			// This only works for single-key sources (File/Url), not directory sources.
+			let key = resolver.resolve_default().await.ok();
+
+			if let Some(key) = key {
+				let (guest_sub, guest_pub) = Self::aggregate_guest_paths(&key, self.public.as_ref());
+
+				if !guest_sub.is_empty() || !guest_pub.is_empty() {
+					let subscribe = guest_sub.into_iter().map(|p| p.to_string()).collect();
+					let publish = guest_pub.into_iter().map(|p| p.to_string()).collect();
+					moq_token::Claims {
+						root: "".to_string(),
+						subscribe,
+						publish,
+						..Default::default()
+					}
+				} else {
+					return Err(AuthError::ExpectedToken);
+				}
+			} else {
+				return Err(AuthError::ExpectedToken);
+			}
 		} else if let Some(public) = &self.public {
+			// Deprecated: --auth-public without a key
 			moq_token::Claims {
 				root: public.to_string(),
 				subscribe: vec!["".to_string()],
@@ -262,7 +414,6 @@ impl Auth {
 		};
 
 		// Get the path from the URL, removing any leading or trailing slashes.
-		// We will automatically add a trailing slash when joining the path with the subscribe/publish roots.
 		let root = Path::new(&params.path);
 
 		// Make sure the URL path matches the root path.
@@ -271,26 +422,40 @@ impl Auth {
 		};
 
 		// If a more specific path is provided, reduce the permissions.
-		let subscribe = claims
+		let subscribe: Vec<PathOwned> = claims
 			.subscribe
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
 			})
 			.collect();
 
-		let publish = claims
+		let publish: Vec<PathOwned> = claims
 			.publish
 			.into_iter()
 			.filter_map(|p| {
 				let p = Path::new(&p);
 				if !p.is_empty() {
-					p.strip_prefix(&suffix).map(|p| p.to_owned())
+					if let Some(remaining) = p.strip_prefix(&suffix) {
+						Some(remaining.to_owned())
+					} else if suffix.has_prefix(&p) {
+						// Connection is under the allowed prefix — grant full access
+						Some(Path::new("").to_owned())
+					} else {
+						None
+					}
 				} else {
 					Some(p.to_owned())
 				}
@@ -302,6 +467,11 @@ impl Auth {
 			(Some(_), false) => return Err(AuthError::ExpectedCluster),
 			_ => None,
 		};
+
+		// Reject connections that end up with no permissions after reduction
+		if subscribe.is_empty() && publish.is_empty() && !claims.cluster {
+			return Err(AuthError::IncorrectRoot);
+		}
 
 		Ok(AuthToken {
 			root: root.to_owned(),
@@ -316,33 +486,45 @@ impl Auth {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_token::{Algorithm, Key};
-	use tempfile::NamedTempFile;
+	use moq_token::{Algorithm, Key, KeyId};
+	use tempfile::{NamedTempFile, TempDir};
 
-	fn create_test_key() -> anyhow::Result<(NamedTempFile, Key)> {
+	fn create_test_key_with_kid(kid: &str) -> Key {
+		Key::generate(Algorithm::HS256, Some(moq_token::KeyId::decode(kid).unwrap())).unwrap()
+	}
+
+	fn setup_key_dir(keys: &[(&str, &Key)]) -> TempDir {
+		let dir = TempDir::new().unwrap();
+		for (kid, key) in keys {
+			let path = dir.path().join(format!("{kid}.jwk"));
+			key.to_file(&path).unwrap();
+		}
+		dir
+	}
+
+	fn create_test_key_with_public(guest_sub: &[&str], guest_pub: &[&str]) -> anyhow::Result<(NamedTempFile, Key)> {
 		let key_file = NamedTempFile::new()?;
-		let key = Key::generate(Algorithm::HS256, None)?;
+		let mut key = Key::generate(Algorithm::HS256, None)?;
+		key.guest_sub = guest_sub.iter().map(|s| s.to_string()).collect();
+		key.guest_pub = guest_pub.iter().map(|s| s.to_string()).collect();
 		key.to_file(key_file.path())?;
 		Ok((key_file, key))
 	}
 
 	#[tokio::test]
 	async fn test_anonymous_access_with_public_path() -> anyhow::Result<()> {
-		// Test anonymous access to /anon path
 		let auth = Auth::new(AuthConfig {
 			public: Some("anon".to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Should succeed for anonymous path
-		let token = auth.verify(&AuthParams::new("/anon"))?;
+		let token = auth.verify(&AuthParams::new("/anon")).await?;
 		assert_eq!(token.root, "anon".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
-		// Should succeed for sub-paths under anonymous
-		let token = auth.verify(&AuthParams::new("/anon/room/123"))?;
+		let token = auth.verify(&AuthParams::new("/anon/room/123")).await?;
 		assert_eq!(token.root, Path::new("anon/room/123").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -352,15 +534,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_fully_public() -> anyhow::Result<()> {
-		// Test fully public access (public = "")
 		let auth = Auth::new(AuthConfig {
 			public: Some("".to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Should succeed for any path
-		let token = auth.verify(&AuthParams::new("/any/path"))?;
+		let token = auth.verify(&AuthParams::new("/any/path")).await?;
 		assert_eq!(token.root, Path::new("any/path").to_owned());
 		assert_eq!(token.subscribe, vec![Path::new("").to_owned()]);
 		assert_eq!(token.publish, vec![Path::new("").to_owned()]);
@@ -370,15 +550,13 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_anonymous_access_denied_wrong_prefix() -> anyhow::Result<()> {
-		// Test anonymous access denied for wrong prefix
 		let auth = Auth::new(AuthConfig {
 			public: Some("anon".to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Should fail for non-anonymous path
-		let result = auth.verify(&AuthParams::new("/secret"));
+		let result = auth.verify(&AuthParams::new("/secret")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -386,15 +564,16 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_no_token_no_public_path_fails() -> anyhow::Result<()> {
-		let (key_file, _) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Should fail when no token and no public path
-		let result = auth.verify(&AuthParams::new("/any/path"));
+		let result = auth.verify(&AuthParams::new("/any/path")).await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -408,12 +587,13 @@ mod tests {
 		})
 		.await?;
 
-		// Should fail when token provided but no key configured
-		let result = auth.verify(&AuthParams {
-			path: "/any/path".into(),
-			jwt: Some("fake-token".into()),
-			..Default::default()
-		});
+		let result = auth
+			.verify(&AuthParams {
+				path: "/any/path".into(),
+				jwt: Some("fake-token".into()),
+				..Default::default()
+			})
+			.await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -421,14 +601,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_jwt_token_basic_validation() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a token with basic permissions
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["".to_string()],
@@ -437,12 +618,13 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Should succeed with valid token and matching path
-		let token = auth.verify(&AuthParams {
-			path: "/room/123".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
@@ -452,14 +634,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_jwt_token_wrong_root_path() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a token for room/123
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["".to_string()],
@@ -468,12 +651,13 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Should fail when trying to access wrong path
-		let result = auth.verify(&AuthParams {
-			path: "/secret".into(),
-			jwt: Some(token),
-			..Default::default()
-		});
+		let result = auth
+			.verify(&AuthParams {
+				path: "/secret".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
 		assert!(result.is_err());
 
 		Ok(())
@@ -481,14 +665,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_jwt_token_with_restricted_publish_subscribe() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a token with specific pub/sub restrictions
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["bob".into()],
@@ -497,12 +682,13 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Verify the restrictions are preserved
-		let token = auth.verify(&AuthParams {
-			path: "/room/123".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 		assert_eq!(token.root, "room/123".as_path());
 		assert_eq!(token.subscribe, vec!["bob".as_path()]);
 		assert_eq!(token.publish, vec!["alice".as_path()]);
@@ -512,14 +698,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_jwt_token_read_only() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a read-only token (no publish permissions)
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["".to_string()],
@@ -528,11 +715,13 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let token = auth.verify(&AuthParams {
-			path: "/room/123".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec![]);
 
@@ -541,14 +730,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_jwt_token_write_only() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a write-only token (no subscribe permissions)
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec![],
@@ -557,11 +747,13 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let token = auth.verify(&AuthParams {
-			path: "/room/123".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 		assert_eq!(token.subscribe, vec![]);
 		assert_eq!(token.publish, vec!["bob".as_path()]);
 
@@ -570,14 +762,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_basic() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Create a token with root at room/123 and unrestricted pub/sub
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["".to_string()],
@@ -586,16 +779,15 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to more specific path room/123/alice
-		let token = auth.verify(&AuthParams {
-			path: "/room/123/alice".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123/alice".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
-		// Root should be updated to the more specific path
 		assert_eq!(token.root, Path::new("room/123/alice"));
-		// Empty permissions remain empty (full access under new root)
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
@@ -604,14 +796,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_with_publish_restrictions() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Token allows publishing only to alice/*
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["".to_string()],
@@ -620,17 +813,16 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to room/123/alice - should remove alice prefix from publish
-		let token = auth.verify(&AuthParams {
-			path: "/room/123/alice".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123/alice".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(token.root, "room/123/alice".as_path());
-		// Alice still can't subscribe to anything.
 		assert_eq!(token.subscribe, vec!["".as_path()]);
-		// alice prefix stripped, now can publish to everything under room/123/alice
 		assert_eq!(token.publish, vec!["".as_path()]);
 
 		Ok(())
@@ -638,14 +830,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_with_subscribe_restrictions() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Token allows subscribing only to bob/*
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["bob".into()],
@@ -654,15 +847,15 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to room/123/bob - should remove bob prefix from subscribe
-		let token = auth.verify(&AuthParams {
-			path: "/room/123/bob".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let token = auth
+			.verify(&AuthParams {
+				path: "/room/123/bob".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(token.root, "room/123/bob".as_path());
-		// bob prefix stripped, now can subscribe to everything under room/123/bob
 		assert_eq!(token.subscribe, vec!["".as_path()]);
 		assert_eq!(token.publish, vec!["".as_path()]);
 
@@ -671,14 +864,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_loses_access() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Token allows publishing to alice/* and subscribing to bob/*
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["bob".into()],
@@ -687,30 +881,28 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to room/123/alice - loses ability to subscribe to bob
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/alice".into(),
-			jwt: Some(token.clone()),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/alice".into(),
+				jwt: Some(token.clone()),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(verified.root, "room/123/alice".as_path());
-		// Can't subscribe to bob anymore (alice doesn't have bob prefix)
 		assert_eq!(verified.subscribe, vec![]);
-		// Can publish to everything under alice
 		assert_eq!(verified.publish, vec!["".as_path()]);
 
-		// Connect to room/123/bob - loses ability to publish to alice
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/bob".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/bob".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(verified.root, "room/123/bob".as_path());
-		// Can subscribe to everything under bob
 		assert_eq!(verified.subscribe, vec!["".as_path()]);
-		// Can't publish to alice anymore (bob doesn't have alice prefix)
 		assert_eq!(verified.publish, vec![]);
 
 		Ok(())
@@ -718,14 +910,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_nested_paths() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Token with nested publish/subscribe paths
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["users/bob/screen".into()],
@@ -734,29 +927,28 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to room/123/users - permissions should be reduced
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/users".into(),
-			jwt: Some(token.clone()),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/users".into(),
+				jwt: Some(token.clone()),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(verified.root, "room/123/users".as_path());
-		// users prefix removed from paths
 		assert_eq!(verified.subscribe, vec!["bob/screen".as_path()]);
 		assert_eq!(verified.publish, vec!["alice/camera".as_path()]);
 
-		// Connect to room/123/users/alice - further reduction
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/users/alice".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/users/alice".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
 		assert_eq!(verified.root, "room/123/users/alice".as_path());
-		// Can't subscribe (alice doesn't have bob prefix)
 		assert_eq!(verified.subscribe, vec![]);
-		// users/alice prefix removed, left with camera
 		assert_eq!(verified.publish, vec!["camera".as_path()]);
 
 		Ok(())
@@ -764,14 +956,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn test_claims_reduction_preserves_read_write_only() -> anyhow::Result<()> {
-		let (key_file, key) = create_test_key()?;
+		let key = create_test_key_with_kid("test-key");
+		let dir = setup_key_dir(&[("test-key", &key)]);
+
 		let auth = Auth::new(AuthConfig {
-			key: Some(key_file.path().to_string_lossy().to_string()),
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
 			..Default::default()
 		})
 		.await?;
 
-		// Read-only token
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec!["alice".into()],
@@ -780,18 +973,17 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		// Connect to more specific path
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/alice".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/alice".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
-		// Should remain read-only
 		assert_eq!(verified.subscribe, vec!["".as_path()]);
 		assert_eq!(verified.publish, vec![]);
 
-		// Write-only token
 		let claims = moq_token::Claims {
 			root: "room/123".to_string(),
 			subscribe: vec![],
@@ -800,15 +992,271 @@ mod tests {
 		};
 		let token = key.encode(&claims)?;
 
-		let verified = auth.verify(&AuthParams {
-			path: "/room/123/alice".into(),
-			jwt: Some(token),
-			..Default::default()
-		})?;
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/123/alice".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await?;
 
-		// Should remain write-only
 		assert_eq!(verified.subscribe, vec![]);
 		assert_eq!(verified.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_resolver_file_missing_key() -> anyhow::Result<()> {
+		let dir = TempDir::new()?;
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let key = create_test_key_with_kid("nonexistent");
+		let claims = moq_token::Claims {
+			root: "test".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let result = auth
+			.verify(&AuthParams {
+				path: "/test".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::KeyNotFound)));
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_guest_sub_allows_anonymous_subscribe() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&["demo"], &[])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can subscribe under demo/
+		let token = auth.verify(&AuthParams::new("/")).await?;
+		assert_eq!(token.root, "".as_path());
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo — subscribe reduces to ""
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(token.root, "demo".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /demo/room/123 — still allowed (subpath of guest prefix)
+		let token = auth.verify(&AuthParams::new("/demo/room/123")).await?;
+		assert_eq!(token.root, Path::new("demo/room/123").to_owned());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec![]);
+
+		// Anonymous access to /other — should fail (not under guest prefix)
+		let result = auth.verify(&AuthParams::new("/other")).await;
+		assert!(result.is_err());
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_resolver_multiple_keys() -> anyhow::Result<()> {
+		let key1 = create_test_key_with_kid("key-1");
+		let key2 = create_test_key_with_kid("key-2");
+		let dir = setup_key_dir(&[("key-1", &key1), ("key-2", &key2)]);
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Sign with key-1
+		let claims = moq_token::Claims {
+			root: "room/1".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token1 = key1.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/1".into(),
+				jwt: Some(token1),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(verified.root, "room/1".as_path());
+
+		// Sign with key-2
+		let claims = moq_token::Claims {
+			root: "room/2".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token2 = key2.encode(&claims)?;
+
+		let verified = auth
+			.verify(&AuthParams {
+				path: "/room/2".into(),
+				jwt: Some(token2),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(verified.root, "room/2".as_path());
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_guest_pub_allows_anonymous_publish() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&[], &["demo"])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to / — can publish under demo/
+		let token = auth.verify(&AuthParams::new("/")).await?;
+		assert_eq!(token.subscribe, vec![]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_kid_validation() {
+		assert!(KeyId::decode("abc-123_DEF").is_ok());
+		assert!(KeyId::decode("").is_err());
+		assert!(KeyId::decode("../etc/passwd").is_err());
+		assert!(KeyId::decode("key with spaces").is_err());
+		assert!(KeyId::decode("key/slash").is_err());
+	}
+
+	#[tokio::test]
+	async fn test_jwt_without_kid_rejected() -> anyhow::Result<()> {
+		// Generate a key without a kid
+		let key = Key::generate(Algorithm::HS256, None)?;
+		let dir = TempDir::new()?;
+
+		let auth = Auth::new(AuthConfig {
+			key_dir: Some(dir.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let claims = moq_token::Claims {
+			root: "test".to_string(),
+			subscribe: vec!["".to_string()],
+			..Default::default()
+		};
+		let token = key.encode(&claims)?;
+
+		let result = auth
+			.verify(&AuthParams {
+				path: "/test".into(),
+				jwt: Some(token),
+				..Default::default()
+			})
+			.await;
+		assert!(matches!(result, Err(AuthError::MissingKeyId)));
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_both() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&["demo"], &["demo"])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		let token = auth.verify(&AuthParams::new("/")).await?;
+		assert_eq!(token.subscribe, vec!["demo".as_path()]);
+		assert_eq!(token.publish, vec!["demo".as_path()]);
+
+		// Connecting to /demo reduces both to ""
+		let token = auth.verify(&AuthParams::new("/demo")).await?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_empty_string_allows_everything() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&[""], &[""])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// Anonymous access to any path gets full pub/sub
+		let token = auth.verify(&AuthParams::new("/anything/here")).await?;
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_public_jwt_still_works() -> anyhow::Result<()> {
+		let (key_file, key) = create_test_key_with_public(&["demo"], &[])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// JWT tokens should still work normally, ignoring key public fields
+		let claims = moq_token::Claims {
+			root: "secret".to_string(),
+			subscribe: vec!["".to_string()],
+			publish: vec!["alice".into()],
+			..Default::default()
+		};
+		let jwt = key.encode(&claims)?;
+
+		let token = auth
+			.verify(&AuthParams {
+				path: "/secret".into(),
+				jwt: Some(jwt),
+				..Default::default()
+			})
+			.await?;
+		assert_eq!(token.root, "secret".as_path());
+		assert_eq!(token.subscribe, vec!["".as_path()]);
+		assert_eq!(token.publish, vec!["alice".as_path()]);
+
+		Ok(())
+	}
+
+	#[tokio::test]
+	async fn test_key_no_public_fields_requires_token() -> anyhow::Result<()> {
+		let (key_file, _) = create_test_key_with_public(&[], &[])?;
+		let auth = Auth::new(AuthConfig {
+			key: Some(key_file.path().to_string_lossy().to_string()),
+			..Default::default()
+		})
+		.await?;
+
+		// No public fields and no JWT -> should fail
+		let result = auth.verify(&AuthParams::new("/demo")).await;
+		assert!(result.is_err());
 
 		Ok(())
 	}

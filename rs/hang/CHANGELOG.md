@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6](https://github.com/moq-dev/moq/compare/hang-v0.15.5...hang-v0.15.6) - 2026-04-03
+
+### Other
+
+- Auto-pause emulation when no viewers are watching ([#1201](https://github.com/moq-dev/moq/pull/1201))
+
+## [0.15.5](https://github.com/moq-dev/moq/compare/hang-v0.15.4...hang-v0.15.5) - 2026-04-03
+
+### Other
+
+- Add Markdown linting with remark configuration ([#1183](https://github.com/moq-dev/moq/pull/1183))
+- Add moq-relay release workflow and Nix cache configuration ([#1178](https://github.com/moq-dev/moq/pull/1178))
+
+## [0.15.4](https://github.com/moq-dev/moq/compare/hang-v0.15.3...hang-v0.15.4) - 2026-03-25
+
+### Other
+
+- Add generic ordered::Consumer/Producer to moq-mux ([#1155](https://github.com/moq-dev/moq/pull/1155))
+
 ## [0.15.3](https://github.com/moq-dev/moq/compare/hang-v0.15.2...hang-v0.15.3) - 2026-03-18
 
 ### Other

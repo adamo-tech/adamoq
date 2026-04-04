@@ -101,14 +101,14 @@ check_health() {
 		if $ok && [ "$status" = "200" ]; then
 			if [[ "${HEALTH_STATE[$node]}" == "failing" ]]; then
 				HEALTH_STATE[$node]="ok"
-				local msg="Health recovered: ${node}.${HEALTH_DOMAIN}"
+				local msg="Health recovered: ${node}.${HEALTH_DOMAIN} (from ${HOSTNAME})"
 				echo "$msg"
 				send_webhook "$msg"
 			fi
 		else
 			if [[ "${HEALTH_STATE[$node]}" != "failing" ]]; then
 				HEALTH_STATE[$node]="failing"
-				local msg="Health check FAILED: ${node}.${HEALTH_DOMAIN} (${status:-timeout})"
+				local msg="Health check FAILED: ${node}.${HEALTH_DOMAIN} (${status:-timeout}) (from ${HOSTNAME})"
 				echo "$msg"
 				send_webhook "$msg"
 			else
@@ -122,7 +122,6 @@ check_health() {
 
 while true; do
 	check_memory
-	check_health
 
 	# Use memory backoff if alerting, otherwise check every 60s
 	if [[ "$MEMORY_STATE" == "alerting" ]]; then
