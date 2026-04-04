@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.11](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.10...moq-clock-v0.10.11) - 2026-04-04
+
+### Other
+
+- release ([#1199](https://github.com/moq-dev/moq/pull/1199))
+- Add --version flag to all CLI tools ([#1203](https://github.com/moq-dev/moq/pull/1203))
+- release ([#1174](https://github.com/moq-dev/moq/pull/1174))
+- release ([#1168](https://github.com/moq-dev/moq/pull/1168))
+
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-clock-v0.10.10...moq-clock-v0.10.11) - 2026-04-03
 
 ### Other
