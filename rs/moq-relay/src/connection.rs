@@ -85,18 +85,16 @@ impl Connection {
 	}
 }
 
-/// Handles datagrams: clock sync (cloq) + transport stats feedback.
+/// Handles datagrams: clock heartbeat, transport stats, keyframe requests, video relay.
 ///
-/// Cloq wire format:
-///   Request  (9 bytes): [0x01][t1:u64 BE] — client local time in µs since epoch
-///   Response (25 bytes): [0x02][t1:u64 echo][t2:u64 relay_rx][t3:u64 relay_tx]
+/// Relay clock heartbeat (relay → all clients, every 500ms):
+///   [0x0A][relay_time_us:u64 BE]  (9 bytes)
 ///
-/// Transport stats feedback (relay → publisher, every 500ms):
+/// Transport stats feedback (relay → client, every 500ms):
 ///   [0x03][recv_bytes:u64 BE][recv_packets:u64 BE][lost_packets:u64 BE]
 ///   [rtt_us:u64 BE][cwnd:u64 BE][timestamp_us:u64 BE]
 ///
-/// The publisher uses these to compute goodput, loss rate, and delay variation
-/// on the publisher→relay path (the robot's upload link).
+/// Legacy clock sync (0x01/0x02) still handled for backwards compat.
 async fn run_datagram_handler(
 	dg: moq_native::DatagramHandle,
 	datagram_tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
@@ -135,6 +133,15 @@ async fn run_datagram_handler(
 			buf.extend_from_slice(&now_us().to_be_bytes());
 
 			if dg_stats.send(buf.freeze()).is_err() {
+				break;
+			}
+
+			// Send relay clock heartbeat (0x0A) — relay is the time authority.
+			// Clients compute offset as (relay_time - local_time).
+			let mut hb = bytes::BytesMut::with_capacity(9);
+			hb.extend_from_slice(&[0x0A]);
+			hb.extend_from_slice(&now_us().to_be_bytes());
+			if dg_stats.send(hb.freeze()).is_err() {
 				break;
 			}
 
