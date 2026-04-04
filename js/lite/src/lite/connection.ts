@@ -1,6 +1,7 @@
 import type { Announced } from "../announced.ts";
 import type { Broadcast } from "../broadcast.ts";
 import { SyncClock } from "../cloq.ts";
+import { DatagramDispatcher } from "../datagram.ts";
 import type { Established } from "../connection/established.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream } from "../stream.ts";
@@ -40,6 +41,9 @@ export class Connection implements Established {
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
 
+	// Datagram dispatcher for multiplexing QUIC datagrams by type.
+	readonly datagrams: DatagramDispatcher | null;
+
 	// Relay-synced clock for RTT and offset measurement.
 	readonly clock: SyncClock | null;
 
@@ -64,12 +68,14 @@ export class Connection implements Established {
 		this.#publisher = new Publisher(this.#quic, this.#version);
 		this.#subscriber = new Subscriber(this.#quic, this.#version);
 
-		// Start relay-synced clock (NTP over QUIC datagrams)
+		// Start datagram dispatcher and relay-synced clock
 		try {
-			this.clock = new SyncClock(this.#quic);
+			this.datagrams = new DatagramDispatcher(this.#quic);
+			this.clock = new SyncClock(this.datagrams);
 			console.log("[cloq] clock started");
 		} catch (e) {
 			console.warn("[cloq] failed to start clock:", e);
+			this.datagrams = null;
 			this.clock = null;
 		}
 
@@ -84,6 +90,7 @@ export class Connection implements Established {
 
 		this.#closed = true;
 		this.clock?.close();
+		this.datagrams?.close();
 		this.#publisher.close();
 		this.#subscriber.close();
 

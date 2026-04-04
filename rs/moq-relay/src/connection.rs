@@ -8,6 +8,10 @@ pub struct Connection {
 	pub request: Request,
 	pub cluster: Cluster,
 	pub auth: Auth,
+	/// Send video datagrams to all other connections
+	pub datagram_tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
+	/// Receive video datagrams from other connections
+	pub datagram_rx: tokio::sync::broadcast::Receiver<bytes::Bytes>,
 }
 
 impl Connection {
@@ -57,9 +61,9 @@ impl Connection {
 			.ok_with_datagrams()
 			.await?;
 
-		// Spawn datagram handler (cloq clock sync + transport stats feedback)
+		// Spawn datagram handler (cloq clock sync + transport stats feedback + video datagram relay)
 		if let Some(dg) = dg_handle {
-			tokio::spawn(run_datagram_handler(dg));
+			tokio::spawn(run_datagram_handler(dg, self.datagram_tx, self.datagram_rx));
 		}
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
@@ -84,7 +88,11 @@ impl Connection {
 ///
 /// The publisher uses these to compute goodput, loss rate, and delay variation
 /// on the publisher→relay path (the robot's upload link).
-async fn run_datagram_handler(dg: moq_native::DatagramHandle) {
+async fn run_datagram_handler(
+	dg: moq_native::DatagramHandle,
+	datagram_tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
+	mut datagram_rx: tokio::sync::broadcast::Receiver<bytes::Bytes>,
+) {
 	use web_transport_trait::Stats;
 
 	// Spawn stats feedback + keyframe request sender
@@ -141,27 +149,52 @@ async fn run_datagram_handler(dg: moq_native::DatagramHandle) {
 		}
 	});
 
-	// Handle incoming datagrams (cloq requests)
+	// Spawn task to forward broadcast datagrams to this connection's subscriber
+	let dg_fwd = dg.clone();
+	let forward_task = tokio::spawn(async move {
+		loop {
+			match datagram_rx.recv().await {
+				Ok(data) => {
+					if dg_fwd.send(data).is_err() {
+						break;
+					}
+				}
+				Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+					tracing::warn!("datagram forward lagged, dropped {} datagrams", n);
+				}
+				Err(_) => break,
+			}
+		}
+	});
+
+	// Handle incoming datagrams (cloq requests + video datagram relay)
 	loop {
 		let data = match dg.recv().await {
 			Ok(data) => data,
 			Err(_) => break,
 		};
 
-		if data.len() == 9 && data[0] == 0x01 {
-			let t2 = now_us();
-
-			let mut resp = bytes::BytesMut::with_capacity(25);
-			resp.extend_from_slice(&[0x02]);
-			resp.extend_from_slice(&data[1..9]); // echo t1
-			resp.extend_from_slice(&t2.to_be_bytes());
-			resp.extend_from_slice(&now_us().to_be_bytes()); // t3
-
-			let _ = dg.send(resp.freeze());
+		match data.first() {
+			Some(0x01) if data.len() == 9 => {
+				// Cloq sync request
+				let t2 = now_us();
+				let mut resp = bytes::BytesMut::with_capacity(25);
+				resp.extend_from_slice(&[0x02]);
+				resp.extend_from_slice(&data[1..9]);
+				resp.extend_from_slice(&t2.to_be_bytes());
+				resp.extend_from_slice(&now_us().to_be_bytes());
+				let _ = dg.send(resp.freeze());
+			}
+			Some(0x05) => {
+				// Video datagram — broadcast to all other connections
+				let _ = datagram_tx.send(data);
+			}
+			_ => {}
 		}
 	}
 
 	stats_task.abort();
+	forward_task.abort();
 	tracing::debug!("datagram handler ended");
 }
 

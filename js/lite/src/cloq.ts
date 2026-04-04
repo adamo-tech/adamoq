@@ -10,6 +10,8 @@
  *   Response (25 bytes): [0x02][t1:u64 echo][t2:u64 relay_rx][t3:u64 relay_tx]
  */
 
+import type { DatagramDispatcher } from "./datagram.ts";
+
 const SYNC_INTERVAL_MS = 2000;
 const EWMA_ALPHA = 0.1;
 const RTT_HISTORY_SIZE = 8;
@@ -20,7 +22,6 @@ function localNowUs(): number {
 }
 
 function writeU64BE(view: DataView, offset: number, value: number): void {
-	// Split into high 32 bits and low 32 bits for DataView compatibility
 	const high = Math.floor(value / 0x100000000);
 	const low = value >>> 0;
 	view.setUint32(offset, high);
@@ -41,11 +42,11 @@ export class SyncClock {
 	#readyResolve!: () => void;
 	#ready: Promise<void>;
 
-	constructor(transport: WebTransport) {
+	constructor(dispatcher: DatagramDispatcher) {
 		this.#ready = new Promise((resolve) => {
 			this.#readyResolve = resolve;
 		});
-		this.#run(transport);
+		this.#run(dispatcher);
 	}
 
 	/** Relay-synced time in microseconds since UNIX epoch. */
@@ -78,60 +79,23 @@ export class SyncClock {
 		this.#running = false;
 	}
 
-	async #run(transport: WebTransport): Promise<void> {
-		const writer = transport.datagrams.writable.getWriter();
-		const reader = transport.datagrams.readable.getReader();
-
+	async #run(dispatcher: DatagramDispatcher): Promise<void> {
 		let smoothedOffset: number | null = null;
 		const rttHistory: number[] = [];
+		let pendingT1: number | null = null;
 
-		while (this.#running) {
-			// Build sync request: [0x01][t1:u64 BE]
-			const t1 = localNowUs();
-			const req = new ArrayBuffer(9);
-			const reqView = new DataView(req);
-			reqView.setUint8(0, 0x01);
-			writeU64BE(reqView, 1, t1);
-
-			try {
-				await writer.write(new Uint8Array(req));
-			} catch {
-				break; // transport closed
-			}
-
-			// Wait for response with timeout
-			const resp = await Promise.race([
-				reader.read(),
-				new Promise<{ done: true; value: undefined }>((resolve) =>
-					setTimeout(() => resolve({ done: true, value: undefined }), 1000),
-				),
-			]);
-
-			if (resp.done || !resp.value) {
-				if (resp.done && resp.value === undefined) {
-					// Timeout — try again next interval
-					await sleep(SYNC_INTERVAL_MS);
-					continue;
-				}
-				break; // stream closed
-			}
+		// Register handler for cloq responses (0x02)
+		dispatcher.on(0x02, (data: Uint8Array) => {
+			if (data.byteLength !== 25) return;
+			if (pendingT1 === null) return;
 
 			const t4 = localNowUs();
-			const data = resp.value as Uint8Array;
-
-			if (data.byteLength !== 25 || data[0] !== 0x02) {
-				await sleep(SYNC_INTERVAL_MS);
-				continue;
-			}
-
 			const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 			const t1Echo = readU64BE(view, 1);
 
-			if (t1Echo !== t1) {
-				// Stale response from a previous request
-				await sleep(SYNC_INTERVAL_MS);
-				continue;
-			}
+			if (t1Echo !== pendingT1) return; // stale
+			const t1 = pendingT1;
+			pendingT1 = null;
 
 			const t2 = readU64BE(view, 9);
 			const t3 = readU64BE(view, 17);
@@ -149,10 +113,7 @@ export class SyncClock {
 			if (rttHistory.length >= 3) {
 				const sorted = [...rttHistory].sort((a, b) => a - b);
 				const median = sorted[Math.floor(sorted.length / 2)];
-				if (rttSample > median * 2) {
-					await sleep(SYNC_INTERVAL_MS);
-					continue;
-				}
+				if (rttSample > median * 2) return;
 			}
 
 			// EWMA smoothing
@@ -172,12 +133,26 @@ export class SyncClock {
 					`[cloq] offset=${Math.round(smoothedOffset)}us rtt=${Math.round(rttSample)}us (sync #${this.#syncCount})`,
 				);
 			}
+		});
+
+		// Send sync requests periodically
+		while (this.#running) {
+			const t1 = localNowUs();
+			pendingT1 = t1;
+
+			const req = new ArrayBuffer(9);
+			const reqView = new DataView(req);
+			reqView.setUint8(0, 0x01);
+			writeU64BE(reqView, 1, t1);
+
+			try {
+				await dispatcher.send(new Uint8Array(req));
+			} catch {
+				break;
+			}
 
 			await sleep(SYNC_INTERVAL_MS);
 		}
-
-		writer.releaseLock();
-		reader.releaseLock();
 	}
 }
 

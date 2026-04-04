@@ -85,12 +85,17 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
+	// Shared broadcast channel for video datagrams (relay fan-out)
+	let (datagram_tx, _) = tokio::sync::broadcast::channel::<bytes::Bytes>(256);
+
 	while let Some(request) = server.accept().await {
 		let conn = Connection {
 			id: conn_id,
 			request,
 			cluster: cluster.clone(),
 			auth: auth.clone(),
+			datagram_tx: datagram_tx.clone(),
+			datagram_rx: datagram_tx.subscribe(),
 		};
 
 		conn_id += 1;
