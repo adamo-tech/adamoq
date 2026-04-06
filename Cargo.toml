@@ -11,6 +11,7 @@ members = [
     "rs/moq-lite",
     "rs/moq-msf",
     "rs/moq-mux",
+    "rs/adamoq-bitrate",
     "rs/moq-native",
     "rs/moq-relay",
     "rs/moq-token",
@@ -24,6 +25,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 conducer = { version = "0.3", path = "rs/conducer" }
 hang = { version = "0.15", path = "rs/hang" }
+adamoq-bitrate = { version = "0.1", path = "rs/adamoq-bitrate" }
 moq-lite = { version = "0.15", path = "rs/moq-lite" }
 moq-msf = { version = "0.1", path = "rs/moq-msf" }
 moq-mux = { version = "0.3", path = "rs/moq-mux" }

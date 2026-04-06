@@ -71,7 +71,7 @@ export class Connection implements Established {
 		// Start datagram dispatcher and relay-synced clock
 		try {
 			this.datagrams = new DatagramDispatcher(this.#quic);
-			this.clock = new SyncClock(this.datagrams);
+			this.clock = new SyncClock(this.datagrams, this.#quic);
 			console.log("[cloq] clock started");
 		} catch (e) {
 			console.warn("[cloq] failed to start clock:", e);

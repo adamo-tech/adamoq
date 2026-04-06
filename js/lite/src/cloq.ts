@@ -23,11 +23,13 @@ function readU64BE(view: DataView, offset: number): number {
 
 export class SyncClock {
 	#offsetUs = 0;
+	#rttUs = 0;
 	#syncCount = 0;
 	#readyResolve!: () => void;
 	#ready: Promise<void>;
+	#pendingPingT1: number | null = null;
 
-	constructor(dispatcher: DatagramDispatcher) {
+	constructor(dispatcher: DatagramDispatcher, _transport?: WebTransport) {
 		this.#ready = new Promise((resolve) => {
 			this.#readyResolve = resolve;
 		});
@@ -40,7 +42,8 @@ export class SyncClock {
 			const relayTime = readU64BE(view, 1);
 			const localTime = localNowUs();
 
-			this.#offsetUs = relayTime - localTime;
+			// Correct with half-RTT (from ping responses) for accurate offset
+			this.#offsetUs = relayTime - localTime + this.#rttUs / 2;
 			this.#syncCount++;
 
 			if (this.#syncCount === 1) {
@@ -48,9 +51,52 @@ export class SyncClock {
 			}
 
 			if (this.#syncCount <= 3 || this.#syncCount % 30 === 0) {
-				console.log(`[cloq] offset=${Math.round(this.#offsetUs)}us (heartbeat #${this.#syncCount})`);
+				console.log(
+					`[cloq] offset=${Math.round(this.#offsetUs)}us rtt=${Math.round(this.#rttUs)}us (heartbeat #${this.#syncCount})`,
+				);
 			}
 		});
+
+		// Listen for 0x02 ping responses for RTT measurement
+		dispatcher.on(0x02, (data: Uint8Array) => {
+			if (data.byteLength !== 25) return;
+			if (this.#pendingPingT1 === null) return;
+			const t4 = localNowUs();
+			const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+			const t1Echo = readU64BE(view, 1);
+			if (t1Echo !== this.#pendingPingT1) return;
+			const t2 = readU64BE(view, 9);
+			const t3 = readU64BE(view, 17);
+			this.#pendingPingT1 = null;
+			const rttSample = t4 - t1Echo - (t3 - t2);
+			if (rttSample > 0 && rttSample < 10_000_000) {
+				this.#rttUs = this.#rttUs === 0 ? rttSample : 0.3 * rttSample + 0.7 * this.#rttUs;
+			}
+		});
+
+		// Send periodic RTT pings
+		this.#runPings(dispatcher);
+	}
+
+	async #runPings(dispatcher: DatagramDispatcher): Promise<void> {
+		await this.#ready;
+		while (true) {
+			const t1 = localNowUs();
+			this.#pendingPingT1 = t1;
+			const req = new ArrayBuffer(9);
+			const view = new DataView(req);
+			view.setUint8(0, 0x01);
+			const high = Math.floor(t1 / 0x100000000);
+			const low = t1 >>> 0;
+			view.setUint32(1, high);
+			view.setUint32(5, low);
+			try {
+				await dispatcher.send(new Uint8Array(req));
+			} catch {
+				break;
+			}
+			await new Promise((r) => setTimeout(r, 2000));
+		}
 	}
 
 	/** Relay-synced time in microseconds since UNIX epoch. */
@@ -63,9 +109,9 @@ export class SyncClock {
 		return this.#offsetUs;
 	}
 
-	/** RTT not measured via heartbeat — use WebTransport stats instead. */
+	/** Last known RTT from ping/pong in microseconds. */
 	rttUs(): number {
-		return 0;
+		return this.#rttUs;
 	}
 
 	/** Number of heartbeats received. */

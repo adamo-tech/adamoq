@@ -1,0 +1,10 @@
+[package]
+name = "adamoq-bitrate"
+description = "Adaptive bitrate control for MoQ publishers and relays"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tracing = "0.1"

@@ -72,7 +72,8 @@ impl Connection {
 
 		// Spawn datagram handler (cloq clock sync + transport stats feedback + video datagram relay)
 		if let Some(dg) = dg_handle {
-			tokio::spawn(run_datagram_handler(dg, self.datagram_tx, self.datagram_rx));
+			let conn_id = self.id;
+			tokio::spawn(run_datagram_handler(conn_id, dg, self.datagram_tx, self.datagram_rx));
 		}
 
 		tracing::info!(version = %session.version(), transport, "negotiated");
@@ -96,48 +97,64 @@ impl Connection {
 ///
 /// Legacy clock sync (0x01/0x02) still handled for backwards compat.
 async fn run_datagram_handler(
+	conn_id: u64,
 	dg: moq_native::DatagramHandle,
 	datagram_tx: tokio::sync::broadcast::Sender<bytes::Bytes>,
 	mut datagram_rx: tokio::sync::broadcast::Receiver<bytes::Bytes>,
 ) {
 	use web_transport_trait::Stats;
 
-	// Spawn stats feedback + keyframe request sender
+	// Spawn stats feedback + bitrate controller + keyframe request sender
 	let dg_stats = dg.clone();
 	let stats_task = tokio::spawn(async move {
-		let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+		use adamoq_bitrate::{AllocatorState, BitrateController, TransportStats as BStats};
+
+		let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
 		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-		let mut prev_lost: u64 = 0;
-		let mut prev_recv: u64 = 0;
+		// Assume 2Mbps publisher target; will be updated when we learn the actual rate.
+		let mut controller = BitrateController::new(2_000_000, std::time::Instant::now());
 		let mut last_keyframe_request = std::time::Instant::now();
+
+		// Track inbound throughput (peer → relay). This is the pipe that matters
+		// for a publisher: how fast can they send us data.
+		let mut prev_bytes_received: u64 = 0;
+		let mut prev_time = std::time::Instant::now();
 
 		loop {
 			interval.tick().await;
 
 			let stats = dg_stats.stats();
-			let rtt_us = stats.rtt()
-				.map(|r| r.as_micros() as u64)
-				.unwrap_or(0);
+			let now_inst = std::time::Instant::now();
+			let rtt_us = stats.rtt().map(|r| r.as_micros() as u64).unwrap_or(0);
 			let recv = stats.packets_received().unwrap_or(0);
 			let lost = stats.packets_lost().unwrap_or(0);
+			let bytes_received = stats.bytes_received().unwrap_or(0);
+			let send_rate = stats.estimated_send_rate().unwrap_or(0);
+
+			// Inbound throughput: how fast peer is actually delivering to us.
+			// For publisher connections, this IS the pipe we care about.
+			let delta_bytes = bytes_received.saturating_sub(prev_bytes_received);
+			let delta_s = now_inst.duration_since(prev_time).as_secs_f64().max(0.001);
+			let inbound_throughput_bps = ((delta_bytes as f64 * 8.0) / delta_s) as u64;
+			prev_bytes_received = bytes_received;
+			prev_time = now_inst;
 
 			// Send transport stats (0x03)
 			let mut buf = bytes::BytesMut::with_capacity(49);
 			buf.extend_from_slice(&[0x03]);
-			buf.extend_from_slice(&stats.bytes_received().unwrap_or(0).to_be_bytes());
+			buf.extend_from_slice(&bytes_received.to_be_bytes());
 			buf.extend_from_slice(&recv.to_be_bytes());
 			buf.extend_from_slice(&lost.to_be_bytes());
 			buf.extend_from_slice(&rtt_us.to_be_bytes());
-			buf.extend_from_slice(&(stats.estimated_send_rate().unwrap_or(0)).to_be_bytes());
+			buf.extend_from_slice(&send_rate.to_be_bytes());
 			buf.extend_from_slice(&now_us().to_be_bytes());
 
 			if dg_stats.send(buf.freeze()).is_err() {
 				break;
 			}
 
-			// Send relay clock heartbeat (0x0A) — relay is the time authority.
-			// Clients compute offset as (relay_time - local_time).
+			// Send relay clock heartbeat (0x0A)
 			let mut hb = bytes::BytesMut::with_capacity(9);
 			hb.extend_from_slice(&[0x0A]);
 			hb.extend_from_slice(&now_us().to_be_bytes());
@@ -145,18 +162,34 @@ async fn run_datagram_handler(
 				break;
 			}
 
-			// Detect loss bursts and request keyframe from publisher.
-			// If >5% of packets in this interval were lost, request IDR.
-			// Rate-limit to at most once per 2 seconds.
-			let delta_recv = recv.saturating_sub(prev_recv);
-			let delta_lost = lost.saturating_sub(prev_lost);
-			prev_recv = recv;
-			prev_lost = lost;
+			// Run bitrate controller using INBOUND throughput (publisher→relay pipe).
+			// This is the right signal for controlling the publisher's encode rate.
+			let tstats = BStats {
+				estimated_send_rate_bps: inbound_throughput_bps,
+				packets_sent: recv,   // packets the peer sent us
+				packets_lost: lost,
+				bytes_sent: bytes_received,
+				rtt_us,
+			};
+			if let Some(signal) = controller.update(tstats, std::time::Instant::now()) {
+				// In Stable state, send ceiling=0 to mean "no limit, use your configured max".
+				// Otherwise send the computed ceiling in kbps.
+				let ceiling_kbps = if matches!(signal.state, AllocatorState::Stable) {
+					0u32
+				} else {
+					(signal.ceiling_bps / 1000) as u32
+				};
+				let mut cc_buf = bytes::BytesMut::with_capacity(6);
+				cc_buf.extend_from_slice(&[0x07]);
+				cc_buf.extend_from_slice(&ceiling_kbps.to_be_bytes());
+				cc_buf.extend_from_slice(&[signal.state.as_u8()]);
+				let _ = dg_stats.send(cc_buf.freeze());
 
-			if delta_recv > 0 {
-				let loss_rate = delta_lost as f64 / (delta_recv + delta_lost) as f64;
-				if loss_rate > 0.05 && last_keyframe_request.elapsed() > std::time::Duration::from_secs(2) {
-					tracing::info!(loss_rate = %format!("{:.1}%", loss_rate * 100.0), "requesting keyframe from publisher (loss burst)");
+				// Request keyframe when entering Deficient state with significant loss.
+				if matches!(signal.state, AllocatorState::Deficient)
+					&& signal.estimate.loss_rate > 0.05
+					&& last_keyframe_request.elapsed() > std::time::Duration::from_secs(2)
+				{
 					let kf_buf = bytes::Bytes::from_static(&[0x04]);
 					let _ = dg_stats.send(kf_buf);
 					last_keyframe_request = std::time::Instant::now();

@@ -321,13 +321,27 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				sequence,
 			};
 
-			// Clean up finished group handles (don't cancel — let delivery timeout handle stale groups)
-			active_groups.retain(|(_, handle)| !handle.is_finished());
+			// Cancel older groups: a new keyframe has arrived, so any remaining data
+			// from older groups is stale. This frees QUIC congestion window and bandwidth
+			// for the new group's delivery. Aborting the task drops its Writer, whose
+			// Drop impl resets the underlying QUIC stream (see coding/writer.rs).
+			let mut superseded = 0usize;
+			active_groups.retain(|(seq, handle)| {
+				if *seq < sequence {
+					handle.abort();
+					superseded += 1;
+					false
+				} else {
+					!handle.is_finished()
+				}
+			});
 
 			let priority = priority.insert(track.info.priority, sequence);
 			let concurrent = tasks.len();
-			if concurrent > 0 {
-				tracing::warn!(sequence, concurrent, "serving group (concurrent with {} others)", concurrent);
+			if superseded > 0 {
+				tracing::debug!(sequence, superseded, "serving group (superseded {} older group(s))", superseded);
+			} else if concurrent > 0 {
+				tracing::debug!(sequence, concurrent, "serving group (concurrent with {} others)", concurrent);
 			}
 			let task = tokio::spawn(Self::serve_group(session.clone(), msg, priority, group, version));
 			active_groups.push((sequence, task.abort_handle()));
@@ -350,11 +364,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
 
-		// Delivery timeout: abort stale groups to free congestion window for newer ones.
-		// If a group takes longer than this to deliver, reset the stream.
-		// NOTE: this is wall-clock from stream open, and frames arrive over ~1s for a
-		// 30-frame GOP. The proper fix is to reset based on newer group arrival.
-		let deadline = tokio::time::sleep(std::time::Duration::from_millis(500));
+		// Stall safety net: if this group can't deliver in this window, the publisher
+		// has likely stalled or the subscriber's link is severely degraded. Stale-group
+		// cancellation is now handled by run_track aborting older groups when newer ones
+		// arrive, so this timeout only needs to catch the stalled-publisher case.
+		let deadline = tokio::time::sleep(std::time::Duration::from_secs(3));
 		tokio::pin!(deadline);
 
 		loop {

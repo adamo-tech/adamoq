@@ -233,9 +233,13 @@ class DecoderTrack {
 	#lastConsumerYield = 0;
 	#lastBenchLog = 0;
 
+	// Per-frame arrival tracking (wall-clock deltas between consecutive frames).
+	#lastFrameArrivalMs = 0;
+	#arrivalDeltasMs: number[] = [];
+
 	#logBenchmarks(): void {
 		const now = performance.now();
-		if (now - this.#lastBenchLog < 5000) return;
+		if (now - this.#lastBenchLog < 1000) return;
 		this.#lastBenchLog = now;
 
 		const avg = (arr: number[]) => arr.length > 0 ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
@@ -246,9 +250,24 @@ class DecoderTrack {
 		const cw = avg(this.#consumerWaitTimes);
 		const n = this.#depacketizeTimes.length;
 
+		// Smoothness metrics from per-frame arrival deltas.
+		// Assume 30fps nominal (33.3ms expected interval).
+		const nominalDelta = 33.3;
+		let arrivalJitterMs = 0;
+		let maxGapMs = 0;
+		let lateFrames = 0;
+		const deltas = this.#arrivalDeltasMs;
+		if (deltas.length > 1) {
+			const mean = avg(deltas);
+			const variance = deltas.reduce((s, d) => s + (d - mean) * (d - mean), 0) / deltas.length;
+			arrivalJitterMs = Math.sqrt(variance);
+			maxGapMs = Math.max(...deltas);
+			lateFrames = deltas.filter((d) => d > 2 * nominalDelta).length;
+		}
+
 		if (n > 0) {
 			console.log(
-				`[bench] consumer_wait=${cw.toFixed(2)}ms depacketize=${dp.toFixed(2)}ms decode=${dc.toFixed(2)}ms sync_wait=${sw.toFixed(2)}ms render=${rn.toFixed(2)}ms total=${(cw + dp + dc + sw + rn).toFixed(2)}ms (${n} frames)`
+				`[bench] consumer_wait=${cw.toFixed(2)}ms depacketize=${dp.toFixed(2)}ms decode=${dc.toFixed(2)}ms sync_wait=${sw.toFixed(2)}ms render=${rn.toFixed(2)}ms total=${(cw + dp + dc + sw + rn).toFixed(2)}ms | jitter=${arrivalJitterMs.toFixed(1)}ms maxGap=${maxGapMs.toFixed(0)}ms late=${lateFrames} (${n} frames)`
 			);
 		}
 
@@ -259,6 +278,9 @@ class DecoderTrack {
 			depacketizeMs: dp,
 			decodeMs: dc,
 			renderMs: rn,
+			arrivalJitterMs,
+			maxGapMs,
+			lateFrames,
 		}));
 
 		this.#depacketizeTimes = [];
@@ -266,6 +288,7 @@ class DecoderTrack {
 		this.#renderTimes = [];
 		this.#syncWaitTimes = [];
 		this.#consumerWaitTimes = [];
+		this.#arrivalDeltasMs = [];
 	}
 
 	#run(effect: Effect): void {
@@ -381,6 +404,10 @@ class DecoderTrack {
 				this.#consumerWaitTimes.push(waitEnd - waitStart);
 
 				const receiveTime = performance.now();
+				if (this.#lastFrameArrivalMs > 0) {
+					this.#arrivalDeltasMs.push(receiveTime - this.#lastFrameArrivalMs);
+				}
+				this.#lastFrameArrivalMs = receiveTime;
 				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 
 				const chunk = new EncodedVideoChunk({
@@ -395,6 +422,9 @@ class DecoderTrack {
 					depacketizeMs: current?.depacketizeMs ?? 0,
 					decodeMs: current?.decodeMs ?? 0,
 					renderMs: current?.renderMs ?? 0,
+					arrivalJitterMs: current?.arrivalJitterMs ?? 0,
+					maxGapMs: current?.maxGapMs ?? 0,
+					lateFrames: current?.lateFrames ?? 0,
 				}));
 
 				if (previous?.group === group || (previous?.final && previous.group + 1 === group)) {
@@ -472,6 +502,9 @@ class DecoderTrack {
 									depacketizeMs: current?.depacketizeMs ?? 0,
 									decodeMs: current?.decodeMs ?? 0,
 									renderMs: current?.renderMs ?? 0,
+									arrivalJitterMs: current?.arrivalJitterMs ?? 0,
+									maxGapMs: current?.maxGapMs ?? 0,
+									lateFrames: current?.lateFrames ?? 0,
 								}));
 
 								// Track decode buffer

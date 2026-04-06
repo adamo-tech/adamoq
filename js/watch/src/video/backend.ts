@@ -30,4 +30,10 @@ export interface Stats {
 	decodeMs: number;
 	/** Avg time from output callback → frame rendered (ms) */
 	renderMs: number;
+	/** Standard deviation of inter-frame arrival intervals in the sample window (ms) */
+	arrivalJitterMs: number;
+	/** Longest gap between consecutive frame arrivals in the sample window (ms) */
+	maxGapMs: number;
+	/** Count of frames arriving >2x nominal interval after previous (late frames) */
+	lateFrames: number;
 }
