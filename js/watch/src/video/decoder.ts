@@ -236,6 +236,7 @@ class DecoderTrack {
 	// Per-frame arrival tracking (wall-clock deltas between consecutive frames).
 	#lastFrameArrivalMs = 0;
 	#arrivalDeltasMs: number[] = [];
+	#loggedFirstKeyframe = false;
 
 	#logBenchmarks(): void {
 		const now = performance.now();
@@ -375,13 +376,15 @@ class DecoderTrack {
 			this.buffered.update(() => mergeBufferedRanges(network, decode));
 		});
 
-		decoder.configure({
+		const decoderConfig = {
 			...this.config,
 			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
 			optimizeForLatency: this.config.optimizeForLatency ?? true,
 			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
-		});
+		};
+		console.log("[decoder-config]", JSON.stringify({ codec: decoderConfig.codec, codedWidth: decoderConfig.codedWidth, codedHeight: decoderConfig.codedHeight, optimizeForLatency: decoderConfig.optimizeForLatency, hasDescription: !!decoderConfig.description }));
+		decoder.configure(decoderConfig);
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
 
@@ -415,6 +418,24 @@ class DecoderTrack {
 					data: frame.data,
 					timestamp: frame.timestamp,
 				});
+
+				// Per-frame diagnostic logging
+				const gap = this.#lastFrameArrivalMs > 0 ? (receiveTime - this.#lastFrameArrivalMs).toFixed(1) : "—";
+				console.log(
+					`[frame] type=${chunk.type} size=${chunk.byteLength} gap=${gap}ms queueSize=${decoder.decodeQueueSize}`,
+				);
+
+				// Log first keyframe NAL bytes for SPS/PPS verification
+				if (chunk.type === "key" && !this.#loggedFirstKeyframe) {
+					this.#loggedFirstKeyframe = true;
+					const bytes = new Uint8Array(frame.data.slice(0, 40));
+					console.log(
+						"[first-keyframe]",
+						Array.from(bytes)
+							.map((b) => b.toString(16).padStart(2, "0"))
+							.join(" "),
+					);
+				}
 
 				this.stats.update((current) => ({
 					frameCount: (current?.frameCount ?? 0) + 1,
