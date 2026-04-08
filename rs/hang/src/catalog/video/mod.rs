@@ -165,4 +165,9 @@ pub struct VideoConfig {
 	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde(default)]
 	pub jitter: Option<moq_lite::Time>,
+
+	/// If true, the video contains packed stereo frames (top-bottom or side-by-side).
+	/// Viewers should offer a stereo/VR viewing mode.
+	#[serde(default)]
+	pub stereo: Option<bool>,
 }
