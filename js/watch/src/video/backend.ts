@@ -24,6 +24,8 @@ export interface Backend {
 export interface Stats {
 	frameCount: number;
 	bytesReceived: number;
+	/** Avg publisher-side encode time (ms), sent per-frame from the robot */
+	encodeMs: number;
 	/** Avg time from frame received → decoder.decode() (ms) */
 	depacketizeMs: number;
 	/** Avg time from decoder.decode() → output callback (ms) */
