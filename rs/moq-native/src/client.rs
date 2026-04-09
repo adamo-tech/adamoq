@@ -1,5 +1,5 @@
-use crate::QuicBackend;
 use crate::crypto;
+use crate::{Backoff, QuicBackend, Reconnect};
 use anyhow::Context;
 use std::path::PathBuf;
 use std::{net, sync::Arc};
@@ -77,6 +77,10 @@ pub struct ClientConfig {
 	#[serde(default)]
 	pub tls: ClientTls,
 
+	#[command(flatten)]
+	#[serde(default)]
+	pub backoff: Backoff,
+
 	#[cfg(feature = "websocket")]
 	#[command(flatten)]
 	#[serde(default)]
@@ -106,6 +110,7 @@ impl Default for ClientConfig {
 			max_streams: None,
 			version: Vec::new(),
 			tls: ClientTls::default(),
+			backoff: Backoff::default(),
 			#[cfg(feature = "websocket")]
 			websocket: super::ClientWebSocket::default(),
 		}
@@ -119,6 +124,7 @@ impl Default for ClientConfig {
 pub struct Client {
 	moq: moq_lite::Client,
 	versions: moq_lite::Versions,
+	backoff: Backoff,
 	#[cfg(feature = "websocket")]
 	websocket: super::ClientWebSocket,
 	tls: rustls::ClientConfig,
@@ -135,14 +141,15 @@ pub struct Client {
 }
 
 impl Client {
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche")))]
+	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket")))]
 	pub fn new(_config: ClientConfig) -> anyhow::Result<Self> {
-		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
+		anyhow::bail!("no QUIC or WebSocket backend compiled; enable noq, quinn, quiche, or websocket feature");
 	}
 
 	/// Create a new client
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
+	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "websocket"))]
 	pub fn new(config: ClientConfig) -> anyhow::Result<Self> {
+		#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche"))]
 		let backend = config.backend.clone().unwrap_or({
 			#[cfg(feature = "quinn")]
 			{
@@ -232,6 +239,7 @@ impl Client {
 		Ok(Self {
 			moq: moq_lite::Client::new().with_versions(versions.clone()),
 			versions,
+			backoff: config.backoff,
 			#[cfg(feature = "websocket")]
 			websocket: config.websocket,
 			tls,
@@ -274,19 +282,45 @@ impl Client {
 		self
 	}
 
-	#[cfg(not(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh")))]
-	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
-		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, quiche, or iroh feature");
+	/// Start a background reconnect loop that connects to the given URL,
+	/// waits for the session to close, then reconnects with exponential backoff.
+	///
+	/// Returns a [`Reconnect`] handle. Drop or call [`Reconnect::close`] to stop.
+	pub fn reconnect(&self, url: Url) -> Reconnect {
+		Reconnect::new(self.clone(), url, self.backoff.clone())
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
+	#[cfg(not(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	)))]
+	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
+		anyhow::bail!("no backend compiled; enable noq, quinn, quiche, iroh, or websocket feature");
+	}
+
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	))]
 	pub async fn connect(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		let session = self.connect_inner(url).await?;
 		tracing::info!(version = %session.version(), "connected");
 		Ok(session)
 	}
 
-	#[cfg(any(feature = "noq", feature = "quinn", feature = "quiche", feature = "iroh"))]
+	#[cfg(any(
+		feature = "noq",
+		feature = "quinn",
+		feature = "quiche",
+		feature = "iroh",
+		feature = "websocket"
+	))]
 	async fn connect_inner(&self, url: Url) -> anyhow::Result<moq_lite::Session> {
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
@@ -388,7 +422,15 @@ impl Client {
 			}
 		}
 
-		anyhow::bail!("no QUIC backend compiled; enable noq, quinn, or quiche feature");
+		#[cfg(feature = "websocket")]
+		{
+			let alpns = self.versions.alpns();
+			let session = crate::websocket::connect(&self.websocket, &self.tls, url, &alpns).await?;
+			return Ok(self.moq.connect(session).await?);
+		}
+
+		#[cfg(not(feature = "websocket"))]
+		anyhow::bail!("no QUIC backend matched; this should not happen");
 	}
 }
 

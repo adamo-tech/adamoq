@@ -1,3 +1,10 @@
+data "terraform_remote_state" "common" {
+  backend = "local"
+  config = {
+    path = "${path.module}/../common/tofu.tfstate"
+  }
+}
+
 locals {
   roms = {
     "big2small" = "big2small.gb"
@@ -20,29 +27,30 @@ resource "local_file" "boy_prepare_service" {
 resource "local_file" "boy_service" {
   for_each = local.roms
   content = templatefile("${path.module}/boy.service.tftpl", {
-    domain = var.domain
-    name   = each.key
-    rom    = each.value
+    domain   = var.domain
+    name     = each.key
+    rom      = each.value
+    location = var.location
   })
   filename = "${path.module}/gen/boy-${each.key}.service"
 }
 
-# Boy instance (beefier than pub for concurrent emulation + encoding)
+# Boy instance for concurrent emulation + encoding
 resource "linode_instance" "boy" {
   label  = "boy-moq"
   region = "us-central" # Dallas, TX
-  type   = "g6-standard-2"
+  type   = "g6-standard-1"
 
-  image           = "linode/debian12"
+  image           = "linode/ubuntu25.10"
   root_pass       = random_password.boy_root.result
   authorized_keys = var.ssh_keys
 
   firewall_id = linode_firewall.boy.id
 
-  stackscript_id = var.stackscript_id
+  stackscript_id = data.terraform_remote_state.common.outputs.stackscript_id
   stackscript_data = {
     hostname    = "boy.${var.domain}"
-    gcp_account = var.gcp_account_key
+    gcp_account = data.terraform_remote_state.common.outputs.gcp_account_key
   }
 
   tags = ["boy", "moq"]

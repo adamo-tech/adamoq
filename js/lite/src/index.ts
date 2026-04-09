@@ -1,5 +1,6 @@
 export * as Signals from "@moq/signals";
 export * from "./announced.ts";
+export * from "./bandwidth.ts";
 export * from "./broadcast.ts";
 export { SyncClock } from "./cloq.ts";
 export { DatagramDispatcher } from "./datagram.ts";

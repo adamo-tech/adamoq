@@ -1,4 +1,5 @@
 use super::annexb::{NalIterator, START_CODE};
+use super::stats::{DriftTracker, Stats};
 
 use anyhow::Context;
 use buf_list::BufList;
@@ -26,6 +27,15 @@ pub struct Avc3 {
 	// Cached parameter set NALs for re-insertion before keyframes.
 	cached_sps: Option<Bytes>,
 	cached_pps: Option<Bytes>,
+
+	// Jitter tracking: minimum duration between consecutive frames.
+	last_timestamp: Option<hang::container::Timestamp>,
+	min_duration: Option<hang::container::Timestamp>,
+	jitter: Option<hang::container::Timestamp>,
+
+	// Import statistics.
+	stats: Stats,
+	drift: DriftTracker,
 }
 
 impl Avc3 {
@@ -43,6 +53,11 @@ impl Avc3 {
 			zero: None,
 			cached_sps: None,
 			cached_pps: None,
+			last_timestamp: None,
+			min_duration: None,
+			jitter: None,
+			stats: Stats::default(),
+			drift: DriftTracker::default(),
 		}
 	}
 
@@ -270,8 +285,10 @@ impl Avc3 {
 		let pts = pts.context("missing timestamp")?;
 
 		let payload = std::mem::take(&mut self.current.chunks);
+		let payload_bytes = payload.remaining() as u64;
+		let is_keyframe = self.current.contains_idr;
 
-		if self.current.contains_idr {
+		if is_keyframe {
 			self.track.keyframe()?;
 		}
 
@@ -282,12 +299,41 @@ impl Avc3 {
 
 		self.track.write(frame)?;
 
+		// Record import stats for this frame.
+		let drift = self.drift.track(pts.into());
+		self.stats.record_frame(payload_bytes, is_keyframe, drift);
+
+		// Track the minimum frame duration and update catalog jitter.
+		if let Some(last) = self.last_timestamp
+			&& let Ok(duration) = pts.checked_sub(last)
+			&& duration < self.min_duration.unwrap_or(hang::container::Timestamp::MAX)
+		{
+			self.min_duration = Some(duration);
+
+			// Jitter for individually-flushed frames is just the frame duration.
+			if duration < self.jitter.unwrap_or(hang::container::Timestamp::MAX) {
+				self.jitter = Some(duration);
+
+				if let Ok(jitter) = duration.convert() {
+					if let Some(c) = self.catalog.lock().video.renditions.get_mut(&self.track.info.name) {
+						c.jitter = Some(jitter);
+					}
+				}
+			}
+		}
+		self.last_timestamp = Some(pts);
+
 		self.current.contains_idr = false;
 		self.current.contains_slice = false;
 		self.current.contains_sps = false;
 		self.current.contains_pps = false;
 
 		Ok(())
+	}
+
+	/// Return a snapshot of cumulative import statistics.
+	pub fn stats(&self) -> Stats {
+		self.stats.clone()
 	}
 
 	/// Finish the track, flushing the current group.

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use web_async::Lock;
 
 use super::BroadcastConsumer;
-use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned};
+use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned, PathPrefixes};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -251,8 +251,8 @@ struct OriginNodes {
 
 impl OriginNodes {
 	// Returns nested roots that match the prefixes.
-	// TODO enforce that prefixes can't overlap.
-	pub fn select(&self, prefixes: &[Path]) -> Option<Self> {
+	// PathPrefixes guarantees no duplicates or overlapping prefixes.
+	pub fn select(&self, prefixes: &PathPrefixes) -> Option<Self> {
 		let mut roots = Vec::new();
 
 		for (root, state) in &self.nodes {
@@ -396,9 +396,11 @@ impl OriginProducer {
 	/// Returns a new OriginProducer where all published broadcasts MUST match one of the prefixes.
 	///
 	/// Returns None if there are no legal prefixes.
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn publish_only(&self, prefixes: &[Path]) -> Option<OriginProducer> {
+		let prefixes = PathPrefixes::new(prefixes);
 		Some(OriginProducer {
-			nodes: self.nodes.select(prefixes)?,
+			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 		})
 	}
@@ -410,11 +412,11 @@ impl OriginProducer {
 
 	/// Subscribe to all announced broadcasts matching the prefix.
 	///
-	/// TODO: Don't use overlapping prefixes or duplicates will be published.
-	///
 	/// Returns None if there are no legal prefixes.
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(prefixes)?))
+		let prefixes = PathPrefixes::new(prefixes);
+		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
 	}
 
 	/// Subscribe to a specific broadcast.
@@ -444,6 +446,7 @@ impl OriginProducer {
 		&self.root
 	}
 
+	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
 	}
@@ -526,8 +529,10 @@ impl OriginConsumer {
 	/// Returns a new OriginConsumer that only consumes broadcasts matching one of the prefixes.
 	///
 	/// Returns None if there are no legal prefixes (would always return None).
+	// TODO accept PathPrefixes instead of &[Path]
 	pub fn consume_only(&self, prefixes: &[Path]) -> Option<OriginConsumer> {
-		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(prefixes)?))
+		let prefixes = PathPrefixes::new(prefixes);
+		Some(OriginConsumer::new(self.root.clone(), self.nodes.select(&prefixes)?))
 	}
 
 	/// Returns a new OriginConsumer that automatically strips out the provided prefix.
@@ -544,6 +549,7 @@ impl OriginConsumer {
 		&self.root
 	}
 
+	// TODO return PathPrefixes
 	pub fn allowed(&self) -> impl Iterator<Item = &Path<'_>> {
 		self.nodes.nodes.iter().map(|(root, _)| root)
 	}
@@ -927,8 +933,9 @@ mod tests {
 			.consume_only(&["foo".into(), "bar".into()])
 			.expect("should create limited consumer");
 
-		limited_consumer.assert_next("foo/test", &broadcast1.consume());
+		// Order depends on PathPrefixes canonical sort (lexicographic for same length)
 		limited_consumer.assert_next("bar/test", &broadcast2.consume());
+		limited_consumer.assert_next("foo/test", &broadcast1.consume());
 		limited_consumer.assert_next_wait(); // Should not see "baz/test"
 	}
 
@@ -1108,8 +1115,8 @@ mod tests {
 		bar_consumer.assert_next("bar/test", &broadcast2.consume());
 		bar_consumer.assert_next_wait();
 
-		foobar_consumer.assert_next("foo/test", &broadcast1.consume());
 		foobar_consumer.assert_next("bar/test", &broadcast2.consume());
+		foobar_consumer.assert_next("foo/test", &broadcast1.consume());
 		foobar_consumer.assert_next_wait();
 	}
 
@@ -1134,10 +1141,14 @@ mod tests {
 			.consume_only(&["".into()])
 			.expect("should create consumer with empty prefix");
 
-		// Should still see both broadcasts
-		consumer.assert_next("worm-node/test", &broadcast1.consume());
-		consumer.assert_next("foobar/test", &broadcast2.consume());
+		// Should see both broadcasts (order depends on PathPrefixes sort)
+		let a1 = consumer.try_announced().expect("expected first announcement");
+		let a2 = consumer.try_announced().expect("expected second announcement");
 		consumer.assert_next_wait();
+
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		paths.sort();
+		assert_eq!(paths, ["foobar/test", "worm-node/test"]);
 	}
 
 	#[tokio::test]
@@ -1348,10 +1359,14 @@ mod tests {
 			.consume_only(&["".into()])
 			.expect("consume_only with empty prefix should not fail when user has specific permissions");
 
-		// Should still receive broadcasts from allowed paths
-		consumer.assert_next("worm-node/data", &broadcast1.consume());
-		consumer.assert_next("foobar", &broadcast2.consume());
+		// Should still receive broadcasts from allowed paths (order not guaranteed)
+		let a1 = consumer.try_announced().expect("expected first announcement");
+		let a2 = consumer.try_announced().expect("expected second announcement");
 		consumer.assert_next_wait();
+
+		let mut paths: Vec<_> = [&a1, &a2].iter().map(|(p, _)| p.to_string()).collect();
+		paths.sort();
+		assert_eq!(paths, ["foobar", "worm-node/data"]);
 
 		// Also test that we can still narrow the scope
 		let mut narrow_consumer = user_producer
@@ -1360,5 +1375,70 @@ mod tests {
 
 		narrow_consumer.assert_next("worm-node/data", &broadcast1.consume());
 		narrow_consumer.assert_next_wait(); // Should not see foobar
+	}
+
+	#[tokio::test]
+	async fn test_duplicate_prefixes_deduped() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// publish_only with duplicate prefixes should work (deduped internally)
+		let producer = origin
+			.publish_only(&["demo".into(), "demo".into()])
+			.expect("should create producer");
+
+		assert!(producer.publish_broadcast("demo/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		consumer.assert_next("demo/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_overlapping_prefixes_deduped() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// "demo" and "demo/foo" — "demo/foo" is redundant, only "demo" should remain
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into()])
+			.expect("should create producer");
+
+		// Can still publish under "demo/bar" since "demo" covers everything
+		assert!(producer.publish_broadcast("demo/bar/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		consumer.assert_next("demo/bar/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_overlapping_prefixes_no_duplicate_announcements() {
+		let origin = Origin::produce();
+		let broadcast = Broadcast::produce();
+
+		// Both "demo" and "demo/foo" are requested — should only have one node
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into()])
+			.expect("should create producer");
+
+		assert!(producer.publish_broadcast("demo/foo/stream", broadcast.consume()));
+
+		let mut consumer = producer.consume();
+		// Should only get ONE announcement (not two from overlapping nodes)
+		consumer.assert_next("demo/foo/stream", &broadcast.consume());
+		consumer.assert_next_wait();
+	}
+
+	#[tokio::test]
+	async fn test_allowed_returns_deduped_prefixes() {
+		let origin = Origin::produce();
+
+		let producer = origin
+			.publish_only(&["demo".into(), "demo/foo".into(), "anon".into()])
+			.expect("should create producer");
+
+		let allowed: Vec<_> = producer.allowed().collect();
+		assert_eq!(allowed.len(), 2, "demo/foo should be subsumed by demo");
 	}
 }

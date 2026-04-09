@@ -6,6 +6,8 @@ use mp4_atom::{Any, Atom, DecodeMaybe, Mdat, Moof, Moov, Trak};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use super::stats::{DriftTracker, Stats};
+
 /// Configuration for the fMP4 importer.
 #[derive(Clone, Default)]
 pub struct Fmp4Config {
@@ -54,6 +56,9 @@ pub struct Fmp4 {
 
 	// -- PASSTHROUGH ONLY --
 	moof_raw: Option<Bytes>,
+
+	// -- STATS --
+	stats: Stats,
 }
 
 #[derive(PartialEq, Debug)]
@@ -97,6 +102,9 @@ struct Fmp4Track {
 
 	// The minimum duration between frames for this track.
 	min_duration: Option<Timestamp>,
+
+	// Per-track drift tracker (each track has its own PTS timeline).
+	drift: DriftTracker,
 }
 
 impl Fmp4 {
@@ -113,6 +121,7 @@ impl Fmp4 {
 			broadcast,
 			config,
 			moof_raw: None,
+			stats: Stats::default(),
 		}
 	}
 
@@ -217,6 +226,7 @@ impl Fmp4 {
 					jitter: None,
 					last_timestamp: None,
 					min_duration: None,
+					drift: DriftTracker::default(),
 				},
 			);
 		}
@@ -584,6 +594,11 @@ impl Fmp4 {
 						}
 					}
 
+					// Record stats for this frame.
+					let drift = track.drift.track(timestamp.into());
+					let is_video_keyframe = keyframe && track.kind == TrackKind::Video;
+					self.stats.record_frame(size as u64, is_video_keyframe, drift);
+
 					if timestamp >= max_timestamp.unwrap_or(Timestamp::ZERO) {
 						max_timestamp = Some(timestamp);
 					}
@@ -673,6 +688,11 @@ impl Fmp4 {
 }
 
 impl Fmp4 {
+	/// Return a snapshot of cumulative import statistics.
+	pub fn stats(&self) -> Stats {
+		self.stats.clone()
+	}
+
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		for track in self.tracks.values_mut() {

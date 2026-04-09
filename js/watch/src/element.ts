@@ -3,9 +3,9 @@ import * as Moq from "@moq/lite";
 import { Effect, Signal } from "@moq/signals";
 import { MultiBackend } from "./backend";
 import { Broadcast } from "./broadcast";
-import { Sync } from "./sync";
+import { type Latency, Sync } from "./sync";
 
-const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "jitter"] as const;
+const OBSERVED = ["url", "name", "paused", "volume", "muted", "reload", "latency", "jitter"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 // Close everything when this element is garbage collected.
@@ -52,8 +52,17 @@ export default class MoqWatch extends HTMLElement {
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
+		// Flatten the RTT signal from the connection for the backend.
+		const rtt = new Signal<number | undefined>(undefined);
+		this.signals.run((effect) => {
+			const conn = effect.get(this.connection.established);
+			const rttSignal = conn?.rtt;
+			rtt.set(rttSignal ? effect.get(rttSignal) : undefined);
+		});
+
 		this.backend = new MultiBackend({
 			broadcast: this.broadcast,
+			rtt,
 		});
 		this.signals.cleanup(() => this.backend.close());
 
@@ -114,8 +123,13 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
-			const jitter = Math.floor(effect.get(this.backend.jitter));
-			this.setAttribute("jitter", jitter.toString());
+			const latency = effect.get(this.backend.latency);
+			if (latency === "real-time") {
+				this.setAttribute("latency", "real-time");
+			} else {
+				const jitter = Math.floor(effect.get(this.backend.jitter));
+				this.setAttribute("latency", jitter.toString());
+			}
 		});
 	}
 
@@ -130,6 +144,11 @@ export default class MoqWatch extends HTMLElement {
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
+	}
+
+	#setLatencyNumber(value: string | null) {
+		const parsed = value ? Number.parseFloat(value) : Number.NaN;
+		this.backend.latency.set((Number.isFinite(parsed) ? parsed : 100) as Time.Milli);
 	}
 
 	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
@@ -150,8 +169,15 @@ export default class MoqWatch extends HTMLElement {
 			this.backend.audio.muted.set(newValue !== null);
 		} else if (name === "reload") {
 			this.broadcast.reload.set(newValue !== null);
+		} else if (name === "latency") {
+			if (!newValue || newValue === "real-time") {
+				this.backend.latency.set("real-time");
+			} else {
+				this.#setLatencyNumber(newValue);
+			}
 		} else if (name === "jitter") {
-			this.backend.jitter.set((newValue ? Number.parseFloat(newValue) : 100) as Time.Milli);
+			// Deprecated: use latency="<number>" instead.
+			this.#setLatencyNumber(newValue);
 		} else {
 			const exhaustive: never = name;
 			throw new Error(`Invalid attribute: ${exhaustive}`);
@@ -206,12 +232,22 @@ export default class MoqWatch extends HTMLElement {
 		this.broadcast.reload.set(value);
 	}
 
+	get latency(): Latency {
+		return this.backend.latency.peek();
+	}
+
+	set latency(value: Latency) {
+		this.backend.latency.set(value);
+	}
+
+	/** The jitter buffer in milliseconds. */
 	get jitter(): Time.Milli {
 		return this.backend.jitter.peek();
 	}
 
+	/** @deprecated Use `latency = <number>` instead. */
 	set jitter(value: number) {
-		this.backend.jitter.set(value as Time.Milli);
+		this.backend.latency.set(value as Time.Milli);
 	}
 }
 

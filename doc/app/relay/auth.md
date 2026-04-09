@@ -79,10 +79,14 @@ key_dir = "https://api.example.com/keys"
 moq-token-cli sign --key my-key.jwk --root demo --publish my-stream --subscribe ""
 ```
 
-The client connects with the token:
+The client connects with the token. The connection path can be the root or any parent:
 
 ```text
-https://relay.example.com/demo/my-stream?jwt=eyJhbGciOiJIUzI1NiIs...
+# Connect at the token's root
+https://relay.example.com/demo?jwt=eyJhbGciOiJIUzI1NiIs...
+
+# Connect at the server root (permissions still scoped to demo/)
+https://relay.example.com/?jwt=eyJhbGciOiJIUzI1NiIs...
 ```
 
 ## Key Resolution
@@ -100,7 +104,7 @@ When a client connects with a JWT, the relay:
 1. Decodes the JWT header to extract the `kid` (key ID)
 2. Looks up the key from the configured source: `{dir}/{kid}.jwk` or `{url}/{kid}.jwk`
 3. Verifies the JWT signature with the resolved key
-4. Checks the token's `root` claim matches the connection path
+4. Checks the token's permissions cover the connection path
 
 Key IDs must contain only alphanumeric characters, hyphens, and underscores.
 
@@ -135,6 +139,16 @@ An empty suffix (`""`) allows access to anything under the root.
 | `rooms/123` | `alice` | `""` | `rooms/123/alice` | `rooms/123/*` |
 | `""` | `""` | `""` | Everything | Everything |
 
+### Connection Path
+
+The client's connection URL path does **not** need to match the token's `root` exactly. The connection path determines the scope of the session — all publish/subscribe operations are relative to it.
+
+- If the connection path **extends** the root (e.g., token root=`demo`, connect to `/demo/room`), permissions are narrowed to only paths under `/demo/room`.
+- If the connection path is a **parent** of the root (e.g., token root=`demo`, connect to `/`), permissions still apply but are scoped to the token's root. You can only access paths under `demo/`.
+- If the connection path is **unrelated** to the root (e.g., token root=`demo`, connect to `/other`), the connection is rejected.
+
+The connection is also rejected if the resulting permissions are empty (no publish or subscribe paths remain after scoping).
+
 ## Supported Algorithms
 
 ### Symmetric (HMAC)
@@ -168,65 +182,21 @@ Set `public = ""` to make everything public (development only).
 
 ## Example Configurations
 
-### Development (no auth)
+See the [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) directory for complete working configuration files, including authentication setup:
 
-```toml
-[auth]
-public = ""
-```
-
-### Development (single key)
-
-```toml
-[auth]
-key = "dev.jwk"
-public = "anon"
-```
-
-### Production (local keys with rotation)
-
-```toml
-[auth]
-key_dir = "/etc/moq/keys/"
-```
-
-### Production (remote key server)
-
-```toml
-[auth]
-key_dir = "https://api.example.com/keys"
-```
+- **Development** - [`demo/relay/root.toml`](https://github.com/moq-dev/moq/blob/main/demo/relay/root.toml) (single key with anonymous access)
+- **Production** - [`demo/relay/prod.toml`](https://github.com/moq-dev/moq/blob/main/demo/relay/prod.toml) (key and key directory options)
 
 ## Library Usage
 
-### TypeScript
-
-```typescript
-import { generate, load, sign, type Claims } from "@moq/token"
-
-// Generate a key (random kid assigned automatically)
-const keyString = await generate('HS256')
-
-// Load and sign
-const key = load(keyString)
-const claims: Claims = {
-  root: "demo",
-  pub: "my-stream",
-  sub: "",
-  exp: Math.floor(Date.now() / 1000) + 3600,
-}
-const token = await sign(key, claims)
-```
-
 ### Rust
 
-```bash
-moq-token-cli sign --key my-key.jwk \
-  --root demo \
-  --publish my-stream \
-  --subscribe "" \
-  --expires 3600
-```
+- [`rs/moq-token/examples/basic.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/basic.rs) - Symmetric key generation, signing, and verification
+- [`rs/moq-token/examples/asymmetric.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-token/examples/asymmetric.rs) - Asymmetric key pair with public key extraction
+
+### TypeScript
+
+See [`js/token/examples/sign-and-verify.ts`](https://github.com/moq-dev/moq/blob/main/js/token/examples/sign-and-verify.ts) for a complete working example of signing and verifying tokens.
 
 ## See Also
 

@@ -1,12 +1,16 @@
+import type { Signal } from "@moq/signals";
 import { Announced } from "../announced.ts";
+import type { Bandwidth } from "../bandwidth.ts";
 import { Broadcast, type TrackRequest } from "../broadcast.ts";
 import { Group } from "../group.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream } from "../stream.ts";
+import type * as Time from "../time.ts";
 import type { Track } from "../track.ts";
 import { error } from "../util/error.ts";
 import { Announce, AnnounceInit, AnnounceInterest } from "./announce.ts";
 import type { Group as GroupMessage } from "./group.ts";
+import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
 import { decodeSubscribeResponse, Subscribe } from "./subscribe.ts";
 import { Version } from "./version.ts";
@@ -26,15 +30,26 @@ export class Subscriber {
 	#subscribes = new Map<bigint, Track>();
 	#subscribeNext = 0n;
 
+	// Recv bandwidth producer (Lite03+ only).
+	#recvBandwidth?: Bandwidth;
+
+	// RTT producer (Lite04+ only).
+	#rtt?: Signal<Time.Milli | undefined>;
+
 	/**
 	 * Creates a new Subscriber instance.
 	 * @param quic - The WebTransport session to use
+	 * @param version - The protocol version
+	 * @param recvBandwidth - Optional bandwidth producer for PROBE
+	 * @param rtt - Optional RTT signal for PROBE
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version) {
+	constructor(quic: WebTransport, version: Version, recvBandwidth?: Bandwidth, rtt?: Signal<Time.Milli | undefined>) {
 		this.#quic = quic;
 		this.version = version;
+		this.#recvBandwidth = recvBandwidth;
+		this.#rtt = rtt;
 	}
 
 	/**
@@ -53,7 +68,7 @@ export class Subscriber {
 			// Open a stream and send the announce interest.
 			const stream = await Stream.open(this.#quic);
 			await stream.writer.u53(StreamId.Announce);
-			await msg.encode(stream.writer);
+			await msg.encode(stream.writer, this.version);
 
 			switch (this.version) {
 				case Version.DRAFT_01:
@@ -69,8 +84,8 @@ export class Subscriber {
 					}
 					break;
 				}
-				case Version.DRAFT_03:
-					// Draft03: no AnnounceInit, initial state comes via Announce messages.
+				default:
+					// Draft03+: no AnnounceInit, initial state comes via Announce messages.
 					break;
 			}
 
@@ -192,6 +207,30 @@ export class Subscriber {
 			const e = error(err);
 			producer.close(e);
 			stream.stop(e);
+		}
+	}
+
+	/**
+	 * Opens a PROBE bidi stream to receive bandwidth estimates from the publisher.
+	 * Returns immediately if recv bandwidth is not supported.
+	 * Errors are fatal and propagate to the connection.
+	 *
+	 * @internal
+	 */
+	async runProbe(): Promise<void> {
+		if (!this.#recvBandwidth) return;
+		if (this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02) return;
+
+		const stream = await Stream.open(this.#quic);
+		await stream.writer.u53(StreamId.Probe);
+
+		for (;;) {
+			const probe = await Probe.decodeMaybe(stream.reader, this.version);
+			if (!probe) break;
+			this.#recvBandwidth.set(probe.bitrate || undefined);
+			if (this.#rtt && probe.rtt !== undefined) {
+				this.#rtt.set(probe.rtt as Time.Milli);
+			}
 		}
 	}
 

@@ -352,7 +352,9 @@ class DecoderTrack {
 				effect.close();
 			},
 		});
-		effect.cleanup(() => decoder.close());
+		effect.cleanup(() => {
+			if (decoder.state !== "closed") decoder.close();
+		});
 
 		// Input processing - depends on container type
 		if (this.config.container.kind === "cmaf") {
@@ -365,7 +367,7 @@ class DecoderTrack {
 	#runLegacy(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		// Create consumer that reorders groups/frames up to the provided latency.
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.source.sync.latency,
+			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -410,7 +412,7 @@ class DecoderTrack {
 					this.#arrivalDeltasMs.push(receiveTime - this.#lastFrameArrivalMs);
 				}
 				this.#lastFrameArrivalMs = receiveTime;
-				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
+				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro), "video");
 
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -524,7 +526,8 @@ class DecoderTrack {
 								});
 
 								// Mark that we received this frame right now.
-								this.source.sync.received(Time.Milli.fromMicro(sample.timestamp as Time.Micro));
+								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
+								this.source.sync.received(timestamp, "video");
 
 								// Track stats
 								this.stats.update((current) => ({

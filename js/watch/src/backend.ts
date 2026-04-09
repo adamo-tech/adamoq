@@ -3,7 +3,7 @@ import { Effect, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import type { Broadcast } from "./broadcast";
 import { Muxer } from "./mse";
-import { Sync } from "./sync";
+import { type Latency, Sync } from "./sync";
 import * as Video from "./video";
 
 // Serializable representation of TimeRanges
@@ -36,7 +36,10 @@ export interface Backend {
 	// Audio specific signals.
 	audio?: Audio.Backend;
 
-	// The jitter in milliseconds required for smooth playback.
+	// The latency setting: "real-time" auto-computes jitter, a number sets a fixed jitter.
+	latency: Signal<Latency>;
+
+	// The jitter buffer in milliseconds.
 	jitter: Signal<Moq.Time.Milli>;
 }
 
@@ -44,8 +47,11 @@ export interface MultiBackendProps {
 	element?: HTMLCanvasElement | HTMLVideoElement | Signal<HTMLCanvasElement | HTMLVideoElement | undefined>;
 	broadcast?: Broadcast | Signal<Broadcast | undefined>;
 
-	// Additional jitter in milliseconds on top of catalog jitter.
-	jitter?: Moq.Time.Milli | Signal<Moq.Time.Milli>;
+	// Latency: "real-time" auto-computes jitter from RTT, a number sets a fixed jitter in ms.
+	latency?: Latency | Signal<Latency>;
+
+	// RTT signal from the connection (PROBE), used for dynamic jitter in "real-time" mode.
+	rtt?: Signal<number | undefined>;
 
 	paused?: boolean | Signal<boolean>;
 }
@@ -99,6 +105,7 @@ class AudioBackend implements Audio.Backend {
 export class MultiBackend implements Backend {
 	element = new Signal<HTMLCanvasElement | HTMLVideoElement | undefined>(undefined);
 	broadcast: Signal<Broadcast | undefined>;
+	latency: Signal<Latency>;
 	jitter: Signal<Moq.Time.Milli>;
 	paused: Signal<boolean>;
 
@@ -116,8 +123,9 @@ export class MultiBackend implements Backend {
 	constructor(props?: MultiBackendProps) {
 		this.element = Signal.from(props?.element);
 		this.broadcast = Signal.from(props?.broadcast);
-		this.jitter = Signal.from(props?.jitter ?? (100 as Moq.Time.Milli));
-		this.#sync = new Sync({ jitter: this.jitter });
+		this.#sync = new Sync({ latency: props?.latency, rtt: props?.rtt });
+		this.latency = this.#sync.latency;
+		this.jitter = this.#sync.jitter;
 
 		this.#videoSource = new Video.Source(this.#sync, {
 			broadcast: this.broadcast,

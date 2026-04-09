@@ -3,9 +3,11 @@ use std::{
 	sync::{Arc, atomic},
 };
 
+use futures::{StreamExt, stream::FuturesUnordered};
+
 use crate::{
-	AsPath, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path,
-	PathOwned, TrackProducer,
+	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
+	OriginProducer, Path, PathOwned, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -20,16 +22,23 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	recv_bandwidth: Option<BandwidthProducer>,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+	pub fn new(
+		session: S,
+		origin: Option<OriginProducer>,
+		recv_bandwidth: Option<BandwidthProducer>,
+		version: Version,
+	) -> Self {
 		Self {
 			session,
 			origin,
+			recv_bandwidth,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
@@ -37,9 +46,11 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	pub async fn run(self) -> Result<(), Error> {
+		let bw = self.clone();
 		tokio::select! {
 			Err(err) = self.clone().run_announce() => Err(err),
 			res = self.run_uni() => res,
+			Err(err) = bw.run_recv_bandwidth() => Err(err),
 		}
 	}
 
@@ -72,18 +83,34 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	async fn run_announce(mut self) -> Result<(), Error> {
-		if self.origin.is_none() {
-			// Don't do anything if there's no origin configured.
-			return Ok(());
+	async fn run_announce(self) -> Result<(), Error> {
+		let origin = match &self.origin {
+			Some(origin) => origin,
+			None => return Ok(()),
+		};
+
+		let prefixes: Vec<PathOwned> = origin.allowed().map(|p| p.to_owned()).collect();
+
+		let mut tasks = FuturesUnordered::new();
+		for prefix in prefixes {
+			tasks.push(self.clone().run_announce_prefix(prefix));
 		}
 
+		while let Some(result) = tasks.next().await {
+			result?;
+		}
+
+		Ok(())
+	}
+
+	async fn run_announce_prefix(mut self, prefix: PathOwned) -> Result<(), Error> {
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
-		// Ask for everything.
-		// TODO This should actually ask for each root.
-		let msg = lite::AnnouncePlease { prefix: "".into() };
+		let msg = lite::AnnounceInterest {
+			prefix: prefix.as_path(),
+			exclude_hop: 0,
+		};
 		stream.writer.encode(&msg).await?;
 
 		let mut producers = HashMap::new();
@@ -91,25 +118,28 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
-				for path in msg.suffixes {
+				for suffix in msg.suffixes {
+					let path = prefix.join(&suffix);
 					self.start_announce(path, &mut producers)?;
 				}
 			}
-			Version::Lite03 => {
-				// Lite03: no AnnounceInit, initial state comes via Announce messages.
+			_ => {
+				// Lite03+: no AnnounceInit, initial state comes via Announce messages.
 			}
 		}
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix: path, .. } => {
+				lite::Announce::Active { suffix, .. } => {
+					let path = prefix.join(&suffix);
 					self.start_announce(path, &mut producers)?;
 				}
-				lite::Announce::Ended { suffix: path, .. } => {
+				lite::Announce::Ended { suffix, .. } => {
+					let path = prefix.join(&suffix);
 					tracing::debug!(broadcast = %self.log_path(&path), "unannounced");
 
 					// Abort the producer.
-					let mut producer = producers.remove(&path.into_owned()).ok_or(Error::NotFound)?;
+					let mut producer = producers.remove(&path).ok_or(Error::NotFound)?;
 					producer.abort(Error::Cancel).ok();
 				}
 			}
@@ -118,6 +148,51 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Close the stream when there's nothing more to announce.
 		stream.writer.finish()?;
 		stream.writer.closed().await
+	}
+
+	/// Opens a PROBE stream when consumers exist, reads bandwidth estimates.
+	/// Returns Ok(()) only when recv_bandwidth is None (disabled).
+	/// Stream-level errors (e.g. peer reset) are non-fatal and logged as debug.
+	async fn run_recv_bandwidth(self) -> Result<(), Error> {
+		let Some(bandwidth) = &self.recv_bandwidth else {
+			return Ok(());
+		};
+
+		bandwidth.used().await?;
+
+		let res = self.run_probe_stream(bandwidth).await;
+		match res {
+			Ok(()) | Err(Error::Cancel | Error::Transport(_) | Error::Decode(_) | Error::Remote(_)) => {
+				tracing::debug!("probe stream closed");
+				Ok(())
+			}
+			Err(err) => Err(err),
+		}
+	}
+
+	async fn run_probe_stream(&self, bandwidth: &BandwidthProducer) -> Result<(), Error> {
+		let mut stream = Stream::open(&self.session, self.version).await?;
+		stream.writer.encode(&lite::ControlType::Probe).await?;
+
+		loop {
+			tokio::select! {
+				biased;
+				_ = bandwidth.closed() => {
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
+				res = bandwidth.unused() => {
+					res?;
+					// No more consumers, close the probe stream.
+					stream.writer.finish()?;
+					return stream.writer.closed().await;
+				}
+				probe = stream.reader.decode::<lite::Probe>() => {
+					let probe = probe?;
+					bandwidth.set(Some(probe.bitrate))?;
+				}
+			}
+		}
 	}
 
 	fn start_announce(

@@ -111,7 +111,7 @@ export class Decoder {
 				type: "init",
 				rate: sampleRate,
 				channels: channelCount,
-				latency: this.source.sync.latency.peek(), // Updated reactively via #runLatency
+				latency: this.source.sync.buffer.peek(), // Updated reactively via #runLatency
 			};
 			worklet.port.postMessage(init);
 
@@ -143,7 +143,7 @@ export class Decoder {
 		const worklet = effect.get(this.#worklet);
 		if (!worklet) return;
 
-		const latency = effect.get(this.source.sync.latency);
+		const latency = effect.get(this.source.sync.buffer);
 
 		const msg: Render.Latency = {
 			type: "latency",
@@ -182,7 +182,7 @@ export class Decoder {
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Legacy.Consumer(sub, {
-			latency: this.source.sync.latency,
+			latency: this.source.sync.buffer,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -211,7 +211,9 @@ export class Decoder {
 				},
 				error: (error) => console.error(error),
 			});
-			effect.cleanup(() => decoder.close());
+			effect.cleanup(() => {
+				if (decoder.state !== "closed") decoder.close();
+			});
 
 			const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 			decoder.configure({
@@ -225,6 +227,10 @@ export class Decoder {
 
 				const { frame } = next;
 				if (!frame) continue;
+
+				// Mark that we received this frame right now.
+				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+				this.source.sync.received(timestamp, "audio");
 
 				this.#stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.data.byteLength,
@@ -262,7 +268,9 @@ export class Decoder {
 				output: (data) => this.#emit(data),
 				error: (error) => console.error(error),
 			});
-			effect.cleanup(() => decoder.close());
+			effect.cleanup(() => {
+				if (decoder.state !== "closed") decoder.close();
+			});
 
 			// Configure decoder with description from catalog
 			decoder.configure({
@@ -287,6 +295,10 @@ export class Decoder {
 							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
 
 							for (const sample of samples) {
+								// Mark that we received this frame right now.
+								const timestamp = Time.Milli.fromMicro(sample.timestamp as Time.Micro);
+								this.source.sync.received(timestamp, "audio");
+
 								this.#stats.update((stats) => ({
 									bytesReceived: (stats?.bytesReceived ?? 0) + sample.data.byteLength,
 								}));

@@ -21,8 +21,8 @@ impl QuinnClient {
 		let socket = std::net::UdpSocket::bind(config.bind).context("failed to bind UDP socket")?;
 
 		let mut transport = quinn::TransportConfig::default();
-		transport.max_idle_timeout(Some(time::Duration::from_secs(10).try_into().unwrap()));
-		transport.keep_alive_interval(Some(time::Duration::from_secs(4)));
+		transport.max_idle_timeout(Some(time::Duration::from_secs(30).try_into().unwrap()));
+		transport.keep_alive_interval(Some(time::Duration::from_secs(5)));
 		transport.mtu_discovery_config(None); // Disable MTU discovery
 		transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
 

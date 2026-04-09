@@ -1,4 +1,13 @@
+//! Viewer discovery and command handling.
+//!
+//! Viewers are MoQ publishers: each creates a broadcast under the viewer prefix
+//! with a "command" track containing JSON button states and reset requests.
+//! This module discovers viewer broadcasts and relays their commands to the
+//! emulator thread via an mpsc channel.
+
 use anyhow::Context;
+
+use std::time::Duration;
 
 use crate::emulator::Button;
 
@@ -10,6 +19,7 @@ enum RawCommand {
 	Buttons {
 		#[serde(default)]
 		buttons: Vec<Button>,
+		/// The viewer's current media timestamp in milliseconds (from JSON).
 		#[serde(default)]
 		ts: f64,
 	},
@@ -24,8 +34,8 @@ pub enum Command {
 	Buttons {
 		buttons: Vec<Button>,
 		viewer_id: String,
-		/// The viewer's current media timestamp in milliseconds.
-		ts_ms: f64,
+		/// The viewer's current media timestamp.
+		ts: Duration,
 	},
 	Reset,
 	/// A viewer disconnected or went offline.
@@ -90,7 +100,7 @@ async fn handle_viewer_commands(
 						.send(Command::Buttons {
 							buttons,
 							viewer_id: viewer_id.to_string(),
-							ts_ms: ts,
+							ts: Duration::from_secs_f64(ts / 1000.0),
 						})
 						.await;
 				}
