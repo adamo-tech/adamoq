@@ -437,7 +437,7 @@ class DecoderTrack {
 					`[frame] type=${chunk.type} size=${chunk.byteLength} gap=${gap}ms queueSize=${decoder.decodeQueueSize}`,
 				);
 
-				// Log first keyframe NAL bytes for SPS/PPS verification
+				// On first keyframe: log NAL bytes and reconfigure decoder if SPS doesn't match catalog
 				if (chunk.type === "key" && !this.#loggedFirstKeyframe) {
 					this.#loggedFirstKeyframe = true;
 					const bytes = new Uint8Array(frame.data.slice(0, 40));
@@ -447,6 +447,16 @@ class DecoderTrack {
 							.map((b) => b.toString(16).padStart(2, "0"))
 							.join(" "),
 					);
+
+					// For avc3 streams, parse SPS and reconfigure if codec string doesn't match
+					if (decoderConfig.codec.startsWith("avc3.")) {
+						const spsCodec = parseAvc3Codec(new Uint8Array(frame.data));
+						if (spsCodec && spsCodec !== decoderConfig.codec) {
+							console.warn(`[decoder] codec mismatch: catalog=${decoderConfig.codec} sps=${spsCodec}, reconfiguring`);
+							decoderConfig.codec = spsCodec;
+							decoder.configure(decoderConfig);
+						}
+					}
 				}
 
 				this.stats.update((current) => ({
@@ -633,4 +643,29 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	});
 
 	return supported ?? false;
+}
+
+/** Parse SPS NAL from Annex B bitstream and return the avc3 codec string. */
+function parseAvc3Codec(data: Uint8Array): string | null {
+	for (let i = 0; i < data.length - 7; i++) {
+		// 4-byte start code
+		if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
+			if ((data[i + 4] & 0x1f) === 7) {
+				const profile = data[i + 5];
+				const constraints = data[i + 6];
+				const level = data[i + 7];
+				return `avc3.${profile.toString(16).padStart(2, "0")}${constraints.toString(16).padStart(2, "0")}${level.toString(16).padStart(2, "0")}`;
+			}
+		}
+		// 3-byte start code
+		if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+			if ((data[i + 3] & 0x1f) === 7 && i + 6 < data.length) {
+				const profile = data[i + 4];
+				const constraints = data[i + 5];
+				const level = data[i + 6];
+				return `avc3.${profile.toString(16).padStart(2, "0")}${constraints.toString(16).padStart(2, "0")}${level.toString(16).padStart(2, "0")}`;
+			}
+		}
+	}
+	return null;
 }
