@@ -230,7 +230,6 @@ class DecoderTrack {
 	#renderTimes: number[] = [];
 	#syncWaitTimes: number[] = [];
 	#consumerWaitTimes: number[] = [];
-	#encodeTimes: number[] = [];
 	#lastConsumerYield = 0;
 	#lastBenchLog = 0;
 
@@ -250,7 +249,6 @@ class DecoderTrack {
 		const rn = avg(this.#renderTimes);
 		const sw = avg(this.#syncWaitTimes);
 		const cw = avg(this.#consumerWaitTimes);
-		const en = avg(this.#encodeTimes);
 		const n = this.#depacketizeTimes.length;
 
 		// Smoothness metrics from per-frame arrival deltas.
@@ -270,7 +268,7 @@ class DecoderTrack {
 
 		if (n > 0) {
 			console.log(
-				`[bench] encode=${en.toFixed(2)}ms consumer_wait=${cw.toFixed(2)}ms depacketize=${dp.toFixed(2)}ms decode=${dc.toFixed(2)}ms sync_wait=${sw.toFixed(2)}ms render=${rn.toFixed(2)}ms total=${(en + cw + dp + dc + sw + rn).toFixed(2)}ms | jitter=${arrivalJitterMs.toFixed(1)}ms maxGap=${maxGapMs.toFixed(0)}ms late=${lateFrames} (${n} frames)`
+				`[bench] consumer_wait=${cw.toFixed(2)}ms depacketize=${dp.toFixed(2)}ms decode=${dc.toFixed(2)}ms sync_wait=${sw.toFixed(2)}ms render=${rn.toFixed(2)}ms total=${(cw + dp + dc + sw + rn).toFixed(2)}ms | jitter=${arrivalJitterMs.toFixed(1)}ms maxGap=${maxGapMs.toFixed(0)}ms late=${lateFrames} (${n} frames)`
 			);
 		}
 
@@ -278,7 +276,7 @@ class DecoderTrack {
 		this.stats.update((current) => ({
 			frameCount: current?.frameCount ?? 0,
 			bytesReceived: current?.bytesReceived ?? 0,
-			encodeMs: en,
+			encodeMs: 0,
 			depacketizeMs: dp,
 			decodeMs: dc,
 			renderMs: rn,
@@ -292,7 +290,6 @@ class DecoderTrack {
 		this.#renderTimes = [];
 		this.#syncWaitTimes = [];
 		this.#consumerWaitTimes = [];
-		this.#encodeTimes = [];
 		this.#arrivalDeltasMs = [];
 	}
 
@@ -417,17 +414,9 @@ class DecoderTrack {
 				this.#lastFrameArrivalMs = receiveTime;
 				this.source.sync.received(Time.Milli.fromMicro(frame.timestamp as Time.Micro));
 
-				// Strip 2-byte encode time prefix (BE u16 microseconds) from payload
-				let codecData = frame.data;
-				if (frame.data.byteLength >= 2) {
-					const encodeUs = (frame.data[0] << 8) | frame.data[1];
-					this.#encodeTimes.push(encodeUs / 1000); // convert to ms
-					codecData = frame.data.subarray(2);
-				}
-
 				const chunk = new EncodedVideoChunk({
 					type: frame.keyframe ? "key" : "delta",
-					data: codecData,
+					data: frame.data,
 					timestamp: frame.timestamp,
 				});
 
