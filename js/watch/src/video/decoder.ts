@@ -230,7 +230,6 @@ class DecoderTrack {
 	#renderTimes: number[] = [];
 	#syncWaitTimes: number[] = [];
 	#consumerWaitTimes: number[] = [];
-	#lastConsumerYield = 0;
 	#lastBenchLog = 0;
 
 	// Per-frame arrival tracking (wall-clock deltas between consecutive frames).
@@ -381,10 +380,9 @@ class DecoderTrack {
 			...this.config,
 			description: this.config.description ? Util.Hex.toBytes(this.config.description) : undefined,
 			optimizeForLatency: this.config.optimizeForLatency ?? true,
-			// @ts-expect-error Only supported by Chrome, so the renderer has to flip manually.
 			flip: false,
 		};
-		console.log("[decoder-config]", JSON.stringify({ codec: decoderConfig.codec, codedWidth: decoderConfig.codedWidth, codedHeight: decoderConfig.codedHeight, optimizeForLatency: decoderConfig.optimizeForLatency, hasDescription: !!decoderConfig.description }));
+		console.log("[decoder-config]", JSON.stringify({ codec: decoderConfig.codec, optimizeForLatency: decoderConfig.optimizeForLatency, hasDescription: !!decoderConfig.description }));
 		decoder.configure(decoderConfig);
 
 		let previous: { timestamp: Time.Micro; group: number; final: boolean } | undefined;
